@@ -111,6 +111,22 @@ def resolve_product(
             return None, "brand conflict", None
         return product, None, None
 
+    name_tokens = Counter(normalized_name.split())
+    word_matches = [
+        product
+        for product in catalog.products
+        if name_tokens and Counter(product.normalized_name.split()) == name_tokens
+    ]
+    if word_matches:
+        compatible = [
+            product for product in word_matches if _brand_compatible(entry.Brand, product.brand)
+        ]
+        if not compatible:
+            return None, "brand conflict", None
+        if len(compatible) > 1:
+            return None, "ambiguous word order", None
+        return compatible[0], None, None
+
     candidates: list[tuple[CatalogProduct, float]] = []
     for product in catalog.products:
         eligible, score = _fuzzy_eligible(entry, product, similarity, threshold)

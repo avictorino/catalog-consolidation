@@ -128,9 +128,9 @@ def classify_source(conn: Connection) -> SourceKind:
 # Refactor steps (called by migrations/versions/0001_refactor_catalog.py).
 #
 # SQLite quirk: PRAGMA foreign_keys is a no-op inside a transaction, and the
-# whole refactor runs in the single import transaction. We therefore never
-# enable FK enforcement during the rebuild (SQLAlchemy leaves it off by
-# default) and validate with PRAGMA foreign_key_check at the end.
+# whole refactor runs in the setup transaction. FK enforcement stays off during
+# the rebuild; PRAGMA foreign_key_check validates the result. After that transaction
+# commits, the pipeline enables and verifies enforcement before importing the feed.
 # --------------------------------------------------------------------------- #
 _STAGING_DDL = (
     """
