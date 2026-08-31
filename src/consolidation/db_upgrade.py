@@ -37,7 +37,7 @@ TARGET_TABLES = ("Brand", "Category", "Product", "Seller", "SellerProduct")
 
 # --------------------------------------------------------------------------- #
 # Target schema (canonical names). Used for introspection and by the feed
-# import (PR #3); the refactor below builds the same shape via staged tables.
+# import; the refactor below builds the same shape via staged tables.
 # --------------------------------------------------------------------------- #
 metadata = MetaData()
 

@@ -217,11 +217,14 @@ instant). Indexed candidate reduction is out of scope.
    source and is a no-op for an already-migrated one.
 5. Stream `ProductEntry.json` with `requests` + `ijson`; validate each object with
    Pydantic; screen each string field with `libinjection`.
-6. For each surviving entry: resolve the product; when inserting a new product, mint a
+6. For each surviving entry, open one transaction: resolve the product; when inserting a new product, mint a
    `uuid4` and `get_or_create` its brand and category; `get_or_create` the seller; link
    them (idempotent); accumulate `processed`, `new`, `linked`, `skipped`, `threat`.
-7. Consume the entire document before committing.
-8. Commit -> dispose the engine -> atomically replace the output with the temp file.
+7. Commit each successful entry immediately; roll back an entry failure, record it, and
+   continue with the next entry. Consume the entire document before final publication.
+8. Dispose the engine -> atomically replace the output with the temp file. A published
+   output with item failures returns a non-zero status and includes the failed records
+   in the final log.
 
 Any failure (network, JSON, schema validation, database) -> rollback, discard the temp
 file, previous output preserved. Contained threats and skips do not fail the run. No

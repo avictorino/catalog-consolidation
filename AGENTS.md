@@ -24,8 +24,9 @@ Working rules for AI assistance on this repository.
   import transaction. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
   Alembic's `alembic_version` marker (legacy source migrated, already-migrated source
   left alone, unrecognized schema aborts).
-- One transaction per import (refactor + feed), never per entry. All feed writes are
-  idempotent so a re-run against a previous output is safe.
+- Commit the schema refactor before feed processing, then use one transaction per feed
+  entry. A failed entry is rolled back in isolation, recorded in the final report, and
+  does not prevent later entries from being attempted. All feed writes are idempotent.
 - `Brand` / `Category` are reference tables (nullable FK), not junctions.
   `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.
 - Stream the feed: no `response.json()`, `response.content`, `list(iterator)`, or a
