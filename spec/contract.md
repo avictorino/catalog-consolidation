@@ -12,7 +12,7 @@ Entry point: `python -m consolidation.cli`.
 | `--catalog-url` | `CATALOG_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db` | HTTP(S) URL of the base SQLite catalog |
 | `--products-url` | `PRODUCTS_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json` | HTTP(S) URL of the seller feed |
 | `--output` | `OUTPUT` | `catalog_output.db` (in the current working directory) | destination path for the consolidated database |
-| `--matcher` | `MATCHER` | `difflib` | similarity backend: `difflib` or `rapidfuzz` |
+| `--matcher` | `MATCHER` | `rapidfuzz` | similarity backend: `rapidfuzz` (default) or `difflib` |
 | `--threshold` | `THRESHOLD` | `0.90` | float in `[0, 1]`; the fuzzy cutoff |
 
 - Only HTTP(S) URLs are accepted for `--catalog-url` and `--products-url`. Local files

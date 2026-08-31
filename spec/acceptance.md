@@ -20,7 +20,7 @@ tool must still be correct.
 ### Configuration
 
 - With the shipped `.env`, a bare `python -m consolidation.cli` resolves to the S3
-  sources, `catalog_output.db`, `difflib`, threshold `0.90`.
+  sources, `catalog_output.db`, `rapidfuzz`, threshold `0.90`.
 - Every option has a key in `.env`; precedence holds: CLI > `.env`.
 - Removing `.env` entirely invalidates a bare run before any work starts.
 - A `THRESHOLD` in `.env` or the CLI overrides the backend's suggested value.

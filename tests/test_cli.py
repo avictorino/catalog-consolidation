@@ -12,7 +12,7 @@ FULL_ENV = {
     "CATALOG_URL": "https://example.com/catalog.db",
     "PRODUCTS_URL": "https://example.com/ProductEntry.json",
     "OUTPUT": "catalog_output.db",
-    "MATCHER": "difflib",
+    "MATCHER": "rapidfuzz",
     "THRESHOLD": "0.90",
 }
 
@@ -51,7 +51,7 @@ def test_resolves_from_env_file(env_file: Path) -> None:
         "catalog_url": "https://example.com/catalog.db",
         "products_url": "https://example.com/ProductEntry.json",
         "output": "catalog_output.db",
-        "matcher": "difflib",
+        "matcher": "rapidfuzz",
         "threshold": pytest.approx(0.90),
     }
 
@@ -94,7 +94,7 @@ def test_env_found_from_any_cwd(
     other = tmp_path / "elsewhere"
     other.mkdir()
     monkeypatch.chdir(other)
-    assert cli._resolve(cli._build_parser().parse_args([]))["matcher"] == "difflib"
+    assert cli._resolve(cli._build_parser().parse_args([]))["matcher"] == "rapidfuzz"
 
 
 def test_non_tls_url_warns(env_file: Path, caplog: pytest.LogCaptureFixture) -> None:

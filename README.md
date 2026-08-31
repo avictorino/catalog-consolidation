@@ -8,6 +8,58 @@ introduces one, never duplicating an existing item.
 > VTEX AI Coding Interview take-home. The challenge deliberately contains ambiguities;
 > how they are resolved is documented in [`spec/`](spec/) and [`prd.md`](prd.md).
 
+## Quick start
+
+After copying `.env.example` to `.env`, run the basic command:
+
+```bash
+python -m consolidation.cli
+```
+
+The default configuration uses the published S3 sources, writes
+`catalog_output.db`, uses `rapidfuzz`, and applies a fuzzy threshold of `0.90`.
+
+An expected successful run has the following shape. Timestamps, UUIDs, and temporary
+paths vary between executions:
+
+```text
+HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=catalog_output.db matcher=rapidfuzz threshold=0.9
+HH:MM:SS [INFO] run config products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json matcher=rapidfuzz threshold=0.9
+HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<temporary catalog path>.db.tmp
+HH:MM:SS [INFO] download complete bytes=61440
+HH:MM:SS [INFO] source classified as=legacy
+HH:MM:SS [INFO] extracted reference table=Brand rows=637
+HH:MM:SS [INFO] extracted reference table=Category rows=43
+HH:MM:SS [INFO] extracted product sellers rows=0 column=absent
+HH:MM:SS [INFO] rebuilt Product rows=975
+HH:MM:SS [INFO] rebuilt SellerProduct sellers=0 links=0
+HH:MM:SS [INFO] schema refactor committed
+HH:MM:SS [INFO] foreign key enforcement enabled
+HH:MM:SS [INFO] catalog loaded products=975
+HH:MM:SS [INFO] streaming seller feed url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json
+HH:MM:SS [INFO] first feed record received
+HH:MM:SS [WARNING] event=approximate_match record=57 product_id=<uuid> score=0.909
+HH:MM:SS [WARNING] event=approximate_match record=64 product_id=<uuid> score=0.964
+HH:MM:SS [WARNING] event=category_divergence record=87 product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=87 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [WARNING] event=sqli_attempt record=180 field=Brand fingerprint=s;E1; value="TestBrand'; SELECT 1; --"
+HH:MM:SS [INFO] event=duplicate_listing record=257 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=258 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=259 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=260 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=261 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=262 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=263 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=264 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=265 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=266 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] feed summary processed=269 new=0 linked=256 skipped=0 threat=1 failed=0
+HH:MM:SS [WARNING] feed threats rejected=1
+HH:MM:SS [INFO] feed processing complete
+HH:MM:SS [WARNING] replacing existing output path=<workspace>/catalog_output.db
+HH:MM:SS [INFO] published output path=<workspace>/catalog_output.db
+```
+
 ## Status
 
 Download, schema refactor, and feed import are implemented. The feed is streamed from
@@ -47,7 +99,7 @@ output.
   [`spec/data-profile.md#refactored-database`](spec/data-profile.md#refactored-database)
 - **Why, and the accepted risks:** [`prd.md#database-refactor`](prd.md#database-refactor)
 
-## Planned CLI
+## CLI
 
 ```
 python -m consolidation.cli \
@@ -56,10 +108,26 @@ python -m consolidation.cli \
 ```
 
 - Every option has a default in `.env` (copied from `.env.example`), so a bare
-  `python -m consolidation.cli` runs against the S3 sources with `difflib` at `0.90`.
-- `--matcher` selects the similarity backend: `difflib` (stdlib, default) or `rapidfuzz`
-  (external). Both implement the same `score(a, b) -> float` contract.
+  `python -m consolidation.cli` runs against the S3 sources with `rapidfuzz` at `0.90`.
+- `--matcher` selects the similarity backend: `rapidfuzz` (default) or `difflib`
+  (optional fallback). Both implement the same `score(a, b) -> float` contract.
 - `--threshold` overrides the backend's suggested cutoff and the `.env` value.
+
+### Why `rapidfuzz` is the default
+
+Product names can contain the same words in a different order, for example
+`Smartphone Galaxy S23` and `Galaxy S23 Smartphone`. The importer therefore resolves
+exact normalized names and equal word multisets before it invokes fuzzy matching. This
+deterministic step is what handles word order; neither fuzzy backend should be trusted
+to infer that relationship by itself.
+
+`difflib.SequenceMatcher` is sensitive to character sequence and can be quadratic for
+long strings. It is useful as a dependency-free comparison backend, but it is slower
+and its score can vary substantially when words move. `rapidfuzz.fuzz.ratio` preserves
+the same score contract and is implemented in optimized native code, making it the
+better default when the fuzzy stage scans many catalog products. The threshold and the
+word-order stage remain unchanged, so switching the backend does not change the
+identity rules.
 
 ## Setup
 
@@ -103,7 +171,7 @@ remote content may change.
 | Product identity | normalized `Name`, then identical word multisets regardless of order, then gated fuzzy matching; brand compatibility required; category and feed `Id` never define identity | preserve repeated words and model/capacity tokens; skip ambiguous matches; `Id` is a seller SKU |
 | Normalization | Python, shared by catalog / feed names, brands, categories | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
-| Matcher backends | `difflib` vs `rapidfuzz`, same `score()` contract, injected at the CLI edge | clean interchangeability; no DI container |
+| Matcher backends | `rapidfuzz` by default; `difflib` remains available through the same `score()` contract | optimized fuzzy scoring without changing the matching rules; no DI container |
 | Ambiguous match | skip the row and report it, do not abort the import | one ambiguous row should not hide the outcome of the rest |
 | Transaction | schema refactor is committed first; one transaction per feed entry | failed entries roll back in isolation, later entries continue, and failures are reported |
 
@@ -122,6 +190,29 @@ remote content may change.
   fine at this volume, but `BLOB(16)` / UUIDv7 would be the move if it mattered.
 - The `libinjection` screen may in principle reject a legitimate product whose text
   looks like SQL; every rejection is in the `threat` report for review.
+
+## Future proposal: deduplication with scikit-learn
+
+For a catalog substantially larger than the challenge dataset, a future implementation
+could use `scikit-learn` to reduce the number of fuzzy comparisons. This is a proposal,
+not part of the current runtime or acceptance contract, and should not replace the
+deterministic matching stages.
+
+1. Normalize product names with the existing shared function and preserve model,
+   capacity, and other numeric tokens.
+2. Build a sparse character- or word-ngram representation with
+   `TfidfVectorizer` (or `HashingVectorizer` when incremental updates are required).
+3. Retrieve the top `k` catalog candidates with cosine distance using
+   `NearestNeighbors` or a sparse cosine-similarity search.
+4. Apply the existing brand, token-count, numeric-token, threshold, and ambiguity gates
+   to those candidates before creating a link.
+5. Keep exact-name and word-multiset matching ahead of the model, and send low-margin
+   or conflicting results for review instead of forcing a deduplication decision.
+
+This approach can reduce fuzzy work from a full catalog scan to a small candidate set,
+but it introduces a model/index lifecycle, a new dependency, memory considerations, and
+the need for precision/recall evaluation. A production version should benchmark it with
+real catalog changes and seller naming patterns before changing the default behavior.
 
 Not presented as a high-performance design for very large catalogs; it targets
 incremental consumption at the challenge's volume.
