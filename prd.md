@@ -24,7 +24,8 @@ the database.
 | Feed validation | `pydantic` v2 | one object at a time (`model_validate`) |
 | Similarity | `difflib` (stdlib) / `rapidfuzz` | interchangeable `score()` backends |
 | SQL injection screen | `libinjection` (`libinjection-python`) | WAF-grade tokenizer (ModSecurity uses libinjection); wrapper is GPLv3, core is BSD-3, no cp311/cp312 wheel |
-| Database access + schema | **SQLAlchemy Core 2.x** | declarative target schema, parameterized statements, `insert().from_select()` for the refactor |
+| Database access + schema | **SQLAlchemy Core 2.x** | declarative target schema, parameterized statements, `insert()` for the refactor |
+| Primary keys | **UUID (`uuid4`) as `TEXT`**, generated in Python | non-enumerable, generated without DB coordination, stable across environments; no `AUTOINCREMENT` anywhere |
 | Config | `python-dotenv` | every CLI option has a default in `.env` |
 
 `libinjection-python` is GPLv3 (the underlying libinjection C library is BSD-3). If a
@@ -57,9 +58,9 @@ See [`spec/data-profile.md`](spec/data-profile.md) for the full profile.
 
 ## Database refactor
 
-The given model is compromised. It **is really altered** — not wrapped or shadowed —
-on the downloaded copy, inside the import transaction, before any feed processing.
-SQLAlchemy Core issues the DDL and the data-migration statements.
+The given model is compromised. Both given tables **are really replaced** — not wrapped
+or shadowed — on the downloaded copy, inside the import transaction, before any feed
+processing. SQLAlchemy Core issues the DDL and the data-migration statements.
 
 ### The given model
 
@@ -82,51 +83,58 @@ CREATE TABLE SellerProduct (
 `SellerName` and `Product.Brand` / `Product.Category` are denormalized free text;
 `SellerProductId` is typed `INTEGER` but the feed's identifier is a UUID string (3 are
 not valid UUIDs) reused across sellers; the link table has a useless surrogate key and
-no uniqueness constraint.
+no uniqueness constraint; the integer `AUTOINCREMENT` keys are enumerable and would need
+coordination to mint outside the database.
 
 ### Target model
 
+Every primary key is a `uuid4` stored as `TEXT`, generated in Python. No `AUTOINCREMENT`.
+
 ```sql
 CREATE TABLE Brand (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE          -- normalized brand string
+    Id   TEXT PRIMARY KEY,              -- uuid4
+    Name TEXT NOT NULL UNIQUE           -- normalized brand string
 );
 
 CREATE TABLE Category (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE          -- normalized category string
+    Id   TEXT PRIMARY KEY,              -- uuid4
+    Name TEXT NOT NULL UNIQUE           -- normalized category string
 );
 
 CREATE TABLE Product (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id         TEXT PRIMARY KEY,        -- uuid4
     Name       TEXT NOT NULL,
-    BrandId    INTEGER REFERENCES Brand (Id),      -- nullable (119 base rows have no brand)
-    CategoryId INTEGER REFERENCES Category (Id)    -- nullable (34 base rows have no category)
+    BrandId    TEXT REFERENCES Brand (Id),      -- nullable (119 base rows have no brand)
+    CategoryId TEXT REFERENCES Category (Id)    -- nullable (34 base rows have no category)
 );
 
 CREATE TABLE Seller (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id   TEXT PRIMARY KEY,              -- uuid4
     Name TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE SellerProduct (              -- many-to-many link + the seller's own SKU
-    SellerId    INTEGER NOT NULL REFERENCES Seller (Id),
-    ProductId   INTEGER NOT NULL REFERENCES Product (Id),
-    ExternalSku TEXT NOT NULL,            -- the feed entry's Id (seller's product id)
+    SellerId    TEXT NOT NULL REFERENCES Seller (Id),
+    ProductId   TEXT NOT NULL REFERENCES Product (Id),
+    ExternalSku TEXT NOT NULL,            -- the feed entry's Id (the seller's own id)
     PRIMARY KEY (SellerId, ProductId),
     UNIQUE (SellerId, ExternalSku)
 );
 ```
 
-### What is kept, altered, deleted
+### Kept / replaced / deleted
 
 | Table | Change | Detail |
 | --- | --- | --- |
-| `Product` | **altered in place** | **kept**: `Id` (all 975 rows, values and `sqlite_sequence` preserved), `Name`. **added**: `BrandId`, `CategoryId` (nullable FKs). **deleted**: the `Brand` and `Category` text columns, after their data is migrated. |
-| `SellerProduct` | **dropped and recreated** | `Id` removed (surrogate); `SellerName` removed (moved to `Seller`); `SellerProductId INTEGER` removed (becomes `ExternalSku TEXT`); `ProductId` kept. New `PRIMARY KEY (SellerId, ProductId)` and `UNIQUE (SellerId, ExternalSku)`. |
-| `Brand` | **created** | populated from `Product.Brand` (see migration 1) |
-| `Category` | **created** | populated from `Product.Category` (see migration 2) |
-| `Seller` | **created** | populated from `SellerProduct.SellerName` (see migration 3) |
+| `Product` | **dropped and recreated** | `Name` carried over for all 975 rows. `Id` becomes a fresh `uuid4` (the old integer id is discarded — it was a bare surrogate). `Brand` / `Category` text columns replaced by the `BrandId` / `CategoryId` foreign keys. |
+| `SellerProduct` | **dropped and recreated** | `Id` removed (surrogate); `SellerName` moved to `Seller`; `SellerProductId INTEGER` becomes `ExternalSku TEXT`; `ProductId` becomes a UUID FK. New `PRIMARY KEY (SellerId, ProductId)` and `UNIQUE (SellerId, ExternalSku)`. |
+| `Brand` | **created** | populated from `Product.Brand` (migration 1) |
+| `Category` | **created** | populated from `Product.Category` (migration 2) |
+| `Seller` | **created** | populated from `SellerProduct.SellerName` (migration 3) |
+
+Nothing is altered in place: the PK type change (`INTEGER` → `TEXT`) forces a table
+rebuild in SQLite, so `Product` is rebuilt in the same pass that folds in the reference
+tables.
 
 - **`Brand` and `Category` are reference tables, not junctions.** A product has zero or
   one of each, so each is a nullable foreign key on `Product`. A `BrandProduct` /
@@ -135,8 +143,9 @@ CREATE TABLE SellerProduct (              -- many-to-many link + the seller's ow
   foreign key with extra steps.
 - **`SellerProduct` is a junction** because a product genuinely has many sellers.
 - **`ExternalSku`** carries the seller's own product identifier (the feed entry's `Id`),
-  opaque text. `UNIQUE (SellerId, ExternalSku)` enforces that one of a seller's SKUs
-  maps to at most one product. PascalCase for consistency with the given schema.
+  opaque text — distinct from our generated `Product.Id`. `UNIQUE (SellerId, ExternalSku)`
+  enforces that one of a seller's ids maps to at most one product. PascalCase for
+  consistency with the given schema.
 - `Brand.Name` / `Category.Name` store the normalized value; a human-readable display
   form is future work (`Brand.DisplayName`).
 
@@ -147,8 +156,8 @@ already produced and used incrementally later.
 
 | Detected source | Action |
 | --- | --- |
-| `user_version = 0` **and** legacy tables match (`Product.Brand` + `Product.Category` text columns, `SellerProduct` with `SellerName` + `SellerProductId`, no `Brand`/`Category` tables) | run the migrations below, then `PRAGMA user_version = 1` |
-| `user_version = 1` **and** target tables match (`Brand`, `Category`, `Seller` present; `SellerProduct` has `ExternalSku`) | skip the migrations; go straight to feed processing |
+| `user_version = 0` **and** legacy tables match (`Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct` with `SellerName` + `SellerProductId`, no `Brand`/`Category`/`Seller` tables) | run the migrations below, then `PRAGMA user_version = 1` |
+| `user_version = 1` **and** target tables match (`Brand`, `Category`, `Seller` present; `Product.Id` is `TEXT`; `SellerProduct` has `ExternalSku`) | skip the migrations; go straight to feed processing |
 | anything else | abort with an "unrecognized schema" error before any write |
 
 The published `catalog.db` is always `user_version = 0` / legacy. Running against a
@@ -158,41 +167,37 @@ writes and changes nothing when the feed is unchanged.
 ### Migration steps (inside the single import transaction)
 
 `PRAGMA foreign_keys = OFF` for the whole block; `ON` + `foreign_key_check` at the end.
-Normalization is a Python function, so each extraction reads distinct values, folds
-them in Python, and inserts through SQLAlchemy Core (not a pure `INSERT ... SELECT`).
+Staged tables are built alongside the originals, then swapped in. Normalization is a
+Python function and every `Id` is a Python-generated `uuid4`, so the extractions read
+distinct values, build lookup maps in Python, and insert through SQLAlchemy Core (not a
+pure `INSERT ... SELECT`).
 
-**Migration 1 — `Product.Brand` → `Brand`**
-
-1. `CREATE TABLE Brand (...)`.
-2. `INSERT INTO Brand (Name)` — distinct normalized non-empty `Product.Brand` values (→ 637 rows).
-3. `ALTER TABLE Product ADD COLUMN BrandId INTEGER REFERENCES Brand (Id)`.
-4. `UPDATE Product SET BrandId = <lookup(normalized(Brand))>` — `NULL` where `Brand` is null/empty.
-5. `ALTER TABLE Product DROP COLUMN Brand`.
-
-**Migration 2 — `Product.Category` → `Category`** (same shape as migration 1)
-
-1. `CREATE TABLE Category (...)`.
-2. `INSERT INTO Category (Name)` — distinct normalized non-empty `Product.Category` values (→ 43 rows).
-3. `ALTER TABLE Product ADD COLUMN CategoryId INTEGER REFERENCES Category (Id)`.
-4. `UPDATE Product SET CategoryId = <lookup(normalized(Category))>` — `NULL` where absent.
-5. `ALTER TABLE Product DROP COLUMN Category`.
-
-**Migration 3 — `SellerProduct` rebuild** (PK changes, so a staged table, not `ALTER`)
-
-1. `CREATE TABLE Seller (...)`; `INSERT INTO Seller (Name)` — distinct `SellerProduct.SellerName` (base table empty → 0 rows here; sellers are created later from the feed).
-2. `CREATE TABLE SellerProduct_new (SellerId, ProductId, ExternalSku, PK, UNIQUE)`.
-3. `INSERT INTO SellerProduct_new SELECT s.Id, o.ProductId, CAST(o.SellerProductId AS TEXT) FROM SellerProduct o JOIN Seller s ON s.Name = o.SellerName` (no-op — empty; written to work with data).
-4. `DROP TABLE SellerProduct`; `ALTER TABLE SellerProduct_new RENAME TO SellerProduct`.
-
-**Finalize:** `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
+1. **`Product.Brand` → `Brand`**: create `Brand`; for each distinct normalized non-empty
+   brand insert `(uuid4(), name)` (→ 637 rows); keep `{normalized_brand: brand_id}`.
+2. **`Product.Category` → `Category`**: same (→ 43 rows); keep `{normalized_category: category_id}`.
+3. **`Product` rebuild**: create `Product_new`; for each old row insert
+   `(uuid4(), Name, brand_map.get(...), category_map.get(...))`; keep
+   `{old_int_id: new_uuid}`.
+4. **`SellerProduct.SellerName` → `Seller`**: create `Seller`; insert `(uuid4(), name)`
+   per distinct `SellerName` (base table empty → 0 rows; sellers are created later from
+   the feed).
+5. **`SellerProduct` rebuild**: create `SellerProduct_new`; copy each old row as
+   `(seller_map[SellerName], product_map[ProductId], CAST(SellerProductId AS TEXT))`
+   (base table empty → no rows, but written to work with data).
+6. `DROP TABLE SellerProduct`; `DROP TABLE Product`; rename `Product_new` → `Product`,
+   `SellerProduct_new` → `SellerProduct`.
+7. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
 
 ### Accepted risks
 
+- **UUID `TEXT` primary keys** are ~36 bytes and non-sequential, so indexes are larger
+  and insert locality is worse than integer keys. Negligible at this volume; a `BLOB(16)`
+  encoding or a time-ordered UUIDv7 would mitigate it if it mattered.
 - **Catalog brand and category strings are canonicalized** to their normalized form
   during the refactor; the original raw spelling is not preserved (`DisplayName` later).
-- **`ExternalSku` is the SKU of the first feed entry that created the link.** When a
+- **`ExternalSku` is the id of the first feed entry that created the link.** When a
   seller sends the same resolved product again under a different feed `Id` (name
-  variant), the later SKU is logged (`event=duplicate_listing`) and not stored.
+  variant), the later id is logged (`event=duplicate_listing`) and not stored.
 - **`Product.CategoryId` allows `NULL`** even though the feed always carries a category —
   34 base rows have none, and existing products are never enriched.
 
@@ -307,9 +312,9 @@ instant). Indexed candidate reduction is out of scope.
    migration for a legacy source, nothing for an already-migrated one.
 5. Stream `ProductEntry.json` with `requests` + `ijson`; validate each object with
    Pydantic; screen each string field with `libinjection`.
-6. For each surviving entry: resolve the product; when inserting a new product,
-   `get_or_create` its brand and category; `get_or_create` the seller; link them
-   (idempotent); accumulate `processed`, `new`, `linked`, `skipped`, `threat`.
+6. For each surviving entry: resolve the product; when inserting a new product, mint a
+   `uuid4` and `get_or_create` its brand and category; `get_or_create` the seller; link
+   them (idempotent); accumulate `processed`, `new`, `linked`, `skipped`, `threat`.
 7. Consume the entire document before committing.
 8. Commit -> dispose the engine -> atomically replace the output with the temp file.
 
@@ -320,5 +325,6 @@ partial resume.
 ## Out of scope for the first iteration
 
 Indexed candidate reduction (FTS5 / trigram / spellfix1), the SQLAlchemy ORM, Alembic
-versioned migrations, `Brand.DisplayName` / `Category.DisplayName`, a persisted product
-name index, global product identity, labeled-data evaluation, processing resume.
+versioned migrations, `Brand.DisplayName` / `Category.DisplayName`, `BLOB(16)` / UUIDv7
+key encoding, a persisted product name index, global product identity, labeled-data
+evaluation, processing resume.

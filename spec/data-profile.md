@@ -40,6 +40,7 @@ CREATE TABLE SellerProduct (
 - The surrogate `Id` on a link table is pointless; the natural key is
   `(SellerId, ProductId)`.
 - Nothing enforces uniqueness of a seller/product pair.
+- `AUTOINCREMENT` integer keys are enumerable and need database coordination to mint.
 
 ## Refactored database
 
@@ -48,61 +49,66 @@ so every normal run migrates it. The migration is conditional (guarded by
 `user_version`): a database already at `user_version = 1` with the target tables skips
 it, which keeps incremental re-runs against a previous output possible.
 
-Rebuilt via SQLAlchemy Core (declarative `Table` definitions + `insert()` statements;
-no ORM, no Alembic), inside the import transaction.
+Both given tables **are really replaced** — dropped and recreated — via SQLAlchemy Core
+(declarative `Table` definitions + DDL + `insert()` statements; no ORM, no Alembic),
+inside the import transaction. Every primary key is a `uuid4` stored as `TEXT`, minted
+in Python; no `AUTOINCREMENT`.
 
 ```sql
 CREATE TABLE Brand (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE            -- normalized brand string
+    Id   TEXT PRIMARY KEY,                -- uuid4
+    Name TEXT NOT NULL UNIQUE             -- normalized brand string
 );
 
 CREATE TABLE Category (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE            -- normalized category string
+    Id   TEXT PRIMARY KEY,                -- uuid4
+    Name TEXT NOT NULL UNIQUE             -- normalized category string
 );
 
 CREATE TABLE Product (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id         TEXT PRIMARY KEY,          -- uuid4
     Name       TEXT NOT NULL,
-    BrandId    INTEGER REFERENCES Brand (Id),
-    CategoryId INTEGER REFERENCES Category (Id)
+    BrandId    TEXT REFERENCES Brand (Id),
+    CategoryId TEXT REFERENCES Category (Id)
 );
 
 CREATE TABLE Seller (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id   TEXT PRIMARY KEY,                -- uuid4
     Name TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE SellerProduct (
-    SellerId    INTEGER NOT NULL REFERENCES Seller (Id),
-    ProductId   INTEGER NOT NULL REFERENCES Product (Id),
+    SellerId    TEXT NOT NULL REFERENCES Seller (Id),
+    ProductId   TEXT NOT NULL REFERENCES Product (Id),
     ExternalSku TEXT NOT NULL,           -- the seller's product id (feed entry Id)
     PRIMARY KEY (SellerId, ProductId),
     UNIQUE (SellerId, ExternalSku)
 );
 ```
 
-### Kept / altered / deleted
+### Kept / replaced / deleted
 
-- **`Product`** — altered in place. Kept: `Id` (all 975 rows, values and `sqlite_sequence`
-  preserved), `Name`. Added: `BrandId`, `CategoryId` (nullable FKs). Deleted: the `Brand`
-  and `Category` text columns after their data is migrated.
+- **`Product`** — dropped and recreated. `Name` carried over for all 975 rows; `Id`
+  becomes a fresh `uuid4` (old integer id discarded); `Brand` / `Category` text columns
+  replaced by `BrandId` / `CategoryId` FKs (`NULL` for the 119 brand-less and 34
+  category-less rows).
 - **`SellerProduct`** — dropped and recreated: `Id` removed, `SellerName` → `Seller`,
-  `SellerProductId INTEGER` → `ExternalSku TEXT`, `ProductId` kept; new composite PK and
-  `UNIQUE (SellerId, ExternalSku)`.
-- **`Brand`**, **`Category`**, **`Seller`** — created.
+  `SellerProductId INTEGER` → `ExternalSku TEXT`, `ProductId` becomes a UUID FK; new
+  composite PK and `UNIQUE (SellerId, ExternalSku)`.
+- **`Brand`**, **`Category`**, **`Seller`** — created with UUID PKs.
 
-### Migrations
+### Migrations (staged tables, then swapped in)
 
-1. **`Product.Brand` → `Brand`**: insert distinct normalized non-empty brands (**637**);
-   add `Product.BrandId`; backfill from the lookup (`NULL` for the 119 null rows); drop
-   `Product.Brand`.
-2. **`Product.Category` → `Category`**: same shape (**43** rows; `NULL` for 34 rows);
-   drop `Product.Category`.
-3. **`SellerProduct.SellerName` → `Seller`** and **`SellerProductId` → `ExternalSku`**:
-   staged-table rebuild (base table empty → 0 rows, but written to work with data).
-4. `foreign_key_check` passes; `PRAGMA user_version = 1`.
+1. **`Product.Brand` → `Brand`**: `(uuid4(), name)` per distinct normalized non-empty
+   brand (**637**); keep the brand map.
+2. **`Product.Category` → `Category`**: same (**43**); keep the category map.
+3. **`Product` rebuild**: fresh `uuid4` per row, `Name` carried, `BrandId` / `CategoryId`
+   from the maps; keep `{old_int_id: new_uuid}`.
+4. **`SellerProduct.SellerName` → `Seller`**: `(uuid4(), name)` per distinct name (base
+   table empty → 0 rows).
+5. **`SellerProduct` rebuild**: rows remapped through the seller and product maps,
+   `SellerProductId` → `ExternalSku` as text (base table empty → 0 rows).
+6. `foreign_key_check` passes; `PRAGMA user_version = 1`.
 
 `Brand` and `Category` are **reference tables** (a product has 0..1 of each → nullable
 FK), not junctions. A `BrandProduct` / `CategoryProduct` junction was rejected — it
@@ -174,7 +180,7 @@ The 3 entries without an exact normalized-name match:
 | --- | --- | --- |
 | `Brand` | **637** | distinct normalized catalog brands; no new brands (the one new-product candidate is a threat) |
 | `Category` | **43** | distinct normalized catalog categories; no new categories |
-| `Product` | **975** | unchanged count; `Brand`/`Category` replaced by `BrandId`/`CategoryId`; 119 rows `BrandId IS NULL`, 34 rows `CategoryId IS NULL` |
+| `Product` | **975** | same count, rebuilt with fresh `uuid4` ids; `Brand`/`Category` replaced by `BrandId`/`CategoryId`; 119 rows `BrandId IS NULL`, 34 rows `CategoryId IS NULL` |
 | `Seller` | **20** | distinct feed seller names |
 | `SellerProduct` | **256** | distinct `(SellerId, ProductId)`; 12 feed entries collapse onto an existing pair (11 log `duplicate_listing`), 1 entry is a threat |
 

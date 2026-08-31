@@ -26,44 +26,46 @@ Project scaffolding and specification only. No application code yet.
 | Output | `catalog_output.db` in the working directory (`--output`) |
 
 Every run downloads a fresh copy of the base catalog, **refactors its schema** (see
-below), and rebuilds the output from scratch. The previous output is replaced
-atomically, and only after a fully successful run.
+below), and rebuilds the consolidated result from scratch. The previous output is
+replaced atomically, and only after a fully successful run.
 
 ## Database refactor
 
 The given model is compromised — `SellerName`, `Product.Brand`, and `Product.Category`
 are denormalized free text, `SellerProductId` is typed `INTEGER` while the feed sends
 UUID strings, the link table has a pointless surrogate key and no uniqueness
-constraint. On every run, right after download, it **is really altered** (SQLAlchemy
-Core; no ORM, no Alembic) into:
+constraint, and the keys are enumerable `AUTOINCREMENT` integers. On every run, right
+after download, both given tables **are really replaced** (SQLAlchemy Core; no ORM, no
+Alembic). Every primary key becomes a `uuid4` `TEXT`:
 
 ```sql
-CREATE TABLE Brand    (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE);
-CREATE TABLE Category (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE);
+CREATE TABLE Brand    (Id TEXT PRIMARY KEY, Name TEXT NOT NULL UNIQUE);  -- Id = uuid4
+CREATE TABLE Category (Id TEXT PRIMARY KEY, Name TEXT NOT NULL UNIQUE);
 
 CREATE TABLE Product (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id         TEXT PRIMARY KEY,                    -- uuid4
     Name       TEXT NOT NULL,
-    BrandId    INTEGER REFERENCES Brand (Id),      -- nullable
-    CategoryId INTEGER REFERENCES Category (Id)    -- nullable
+    BrandId    TEXT REFERENCES Brand (Id),          -- nullable
+    CategoryId TEXT REFERENCES Category (Id)        -- nullable
 );
 
-CREATE TABLE Seller (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE);
+CREATE TABLE Seller (Id TEXT PRIMARY KEY, Name TEXT NOT NULL UNIQUE);
 
 CREATE TABLE SellerProduct (              -- many-to-many link + the seller's own SKU
-    SellerId    INTEGER NOT NULL REFERENCES Seller (Id),
-    ProductId   INTEGER NOT NULL REFERENCES Product (Id),
+    SellerId    TEXT NOT NULL REFERENCES Seller (Id),
+    ProductId   TEXT NOT NULL REFERENCES Product (Id),
     ExternalSku TEXT NOT NULL,            -- the feed entry's Id
     PRIMARY KEY (SellerId, ProductId),
     UNIQUE (SellerId, ExternalSku)
 );
 ```
 
-**Kept / altered / deleted:** `Product` is altered in place — `Id` and `Name` kept,
-`BrandId` / `CategoryId` added, the `Brand` and `Category` text columns dropped after a
-**data migration** into the new reference tables. `SellerProduct` is dropped and
-recreated (`SellerName` → `Seller`, `SellerProductId` → `ExternalSku`, surrogate `Id`
-gone). `Brand`, `Category`, `Seller` are new.
+**Kept / replaced / deleted:** `Product` is dropped and recreated — `Name` carried over
+for all 975 rows, `Id` reissued as a `uuid4`, the `Brand` and `Category` text columns
+replaced by `BrandId` / `CategoryId` after a **data migration** into the new reference
+tables. `SellerProduct` is likewise dropped and recreated (`SellerName` → `Seller`,
+`SellerProductId` → `ExternalSku`, surrogate `Id` gone). `Brand`, `Category`, `Seller`
+are new. The PK type change forces a rebuild, so nothing is altered in place.
 
 `Brand` and `Category` are **reference tables** (a product has 0..1 of each → nullable
 FK), not `BrandProduct` / `CategoryProduct` junctions. `SellerProduct` stays a junction
@@ -122,6 +124,7 @@ remote content may change.
 | Decision | Choice | Rationale |
 | --- | --- | --- |
 | Database model | on every run, migrate the given DB: extract `Brand`, `Category` (reference tables) and `Seller`; link is `SellerProduct (SellerId, ProductId, ExternalSku)` with a composite key | the given model denormalizes `SellerName`, `Brand`, `Category` and mistypes the SKU; the challenge allows DB changes |
+| Primary keys | `uuid4` stored as `TEXT`, minted in Python; no `AUTOINCREMENT` | non-enumerable, no DB coordination to mint, stable across environments; accepted cost: larger indexes, worse insert locality |
 | `Brand` / `Category` as reference, not junction | nullable `Product.BrandId` / `Product.CategoryId` FK + data migration then drop the text column | a product has one brand and one category; a junction would allow two |
 | Keep the seller SKU | `SellerProduct.ExternalSku` (opaque text) + `UNIQUE (SellerId, ExternalSku)` | needed to map a listing back to the seller's catalog; reuse is only across sellers |
 | DB access | SQLAlchemy Core (no ORM, no Alembic) | declarative schema + parameterized statements; the refactor is one `user_version`-guarded migration, not a revision chain |
@@ -144,6 +147,8 @@ remote content may change.
 - `difflib.SequenceMatcher` can be quadratic in string length.
 - The refactor canonicalizes catalog brand and category spelling to the normalized
   form; human-readable `DisplayName` columns are future work.
+- UUID `TEXT` primary keys cost index size and insert locality versus integer keys;
+  fine at this volume, but `BLOB(16)` / UUIDv7 would be the move if it mattered.
 - The `libinjection` screen may in principle reject a legitimate product whose text
   looks like SQL; every rejection is in the `threat` report for review.
 

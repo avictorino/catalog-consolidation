@@ -8,7 +8,7 @@ Against the currently published sources, with either matcher backend:
 | --- | --- | --- |
 | `Brand` rows after import | **637** | distinct normalized catalog brands (`BLACK+DECKER`/`Black+Decker` and `Simplehuman`/`simplehuman` each merge); no new brands from the feed |
 | `Category` rows after import | **43** | distinct normalized catalog categories (no merges); no new categories from the feed |
-| `Product` rows after import | **975** | base 975; the only new-product candidate (`Security Test Product`) is rejected as a threat. 119 rows have `BrandId IS NULL`, 34 have `CategoryId IS NULL` |
+| `Product` rows after import | **975** | base 975 rebuilt with fresh `uuid4` ids; the only new-product candidate (`Security Test Product`) is rejected as a threat. 119 rows have `BrandId IS NULL`, 34 have `CategoryId IS NULL` |
 | `Seller` rows after import | **20** | distinct `SellerName` values in the feed |
 | `SellerProduct` rows after import | **256** | distinct `(SellerId, ProductId)`; 12 feed entries re-offer a product the seller already has (11 log `duplicate_listing`), 1 entry is a threat |
 | `new` | 0 | PT→EN name variants match existing products; the one genuine new product is a threat |
@@ -41,14 +41,16 @@ The tool must still be correct; only this table becomes stale.
   `Product (Id, Name, BrandId, CategoryId)`, `Seller (Id, Name UNIQUE)`, and
   `SellerProduct (SellerId, ProductId, ExternalSku)` with `PRIMARY KEY (SellerId, ProductId)`
   and `UNIQUE (SellerId, ExternalSku)`; `foreign_key_check` passes; `user_version = 1`.
-- `Product` no longer has `Brand` or `Category` text columns; every base row keeps its
-  `Id` and `Name` and gains a `BrandId` and `CategoryId` (each possibly `NULL`); no
-  product row is lost; `sqlite_sequence` for `Product` is unchanged.
+- Every `Id` / FK column is a 36-char `uuid4` string; no table uses `AUTOINCREMENT` and
+  `sqlite_sequence` is empty or absent.
+- `Product` no longer has `Brand` or `Category` text columns; all 975 base rows are
+  present with their `Name` and a fresh `uuid4` `Id`, plus a `BrandId` and `CategoryId`
+  (each possibly `NULL`); no product row is lost.
 - `Brand` holds 637 rows (the two case/punctuation pairs merge); `Category` holds 43.
-- The refactor is conditional: a legacy source (`user_version = 0`, `Product.Brand` +
-  `Product.Category` text columns, `SellerProduct.SellerName`) is migrated; a source
-  already at `user_version = 1` skips the migrations; an unrecognized schema aborts
-  before any write.
+- The refactor is conditional: a legacy source (`user_version = 0`, integer `Product.Id`,
+  `Product.Brand` + `Product.Category` text columns, `SellerProduct.SellerName`) is
+  migrated; a source already at `user_version = 1` skips the migrations; an unrecognized
+  schema aborts before any write.
 - Running the tool a second time against its own previous output (an already-migrated
   DB) with the same feed produces logically identical tables and reports 0 `new`.
 - The refactor runs inside the same transaction as feed processing; a later failure
@@ -117,8 +119,9 @@ The tool must still be correct; only this table becomes stale.
   that somehow reached persistence would still be stored as an inert string, never
   executed.
 - Referential integrity holds after the refactor; every base `Product` survives with its
-  `Id` and `Name` intact (`Brand` → `BrandId`, `Category` → `CategoryId`), and any
-  pre-existing `SellerProduct` rows survive as `(SellerId, ProductId, ExternalSku)` links.
+  `Name` (new `uuid4` `Id`, `Brand` → `BrandId`, `Category` → `CategoryId`), and any
+  pre-existing `SellerProduct` rows survive as `(SellerId, ProductId, ExternalSku)` links
+  with the remapped UUID foreign keys.
 
 ### Observability
 

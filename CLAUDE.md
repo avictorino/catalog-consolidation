@@ -12,15 +12,18 @@ Working rules for AI assistance on this repository.
 
 ## Design constraints
 
+- Every primary key is a `uuid4` stored as `TEXT`, minted in Python. No `AUTOINCREMENT`.
 - Refactor the DB via **SQLAlchemy Core** (no ORM, no Alembic), as a **conditional
   migration** guarded by `PRAGMA user_version`: migrate a legacy source (`user_version 0`,
-  `Product.Brand` + `Product.Category` text columns, `SellerProduct.SellerName`) then
-  stamp `user_version = 1`; skip when already `1`; abort on an unrecognized schema.
-- Migrations: (1) `Product.Brand` → `Brand (Id, Name)` table + nullable `Product.BrandId`,
-  then `DROP COLUMN Brand`; (2) same for `Product.Category` → `Category` + `CategoryId`;
-  (3) rebuild `SellerProduct` as `(SellerId, ProductId, ExternalSku)` with
-  `PRIMARY KEY (SellerId, ProductId)` and `UNIQUE (SellerId, ExternalSku)`, `SellerName`
-  → `Seller (Id, Name)`. `Product.Id` and `sqlite_sequence` are preserved.
+  integer `Product.Id`, `Product.Brand` + `Product.Category` columns,
+  `SellerProduct.SellerName`) then stamp `user_version = 1`; skip when already `1`; abort
+  on an unrecognized schema.
+- Both given tables are dropped and recreated (the `INTEGER` → `TEXT` PK change forces a
+  rebuild). Migrations, via staged tables: (1) `Product.Brand` → `Brand (Id, Name)`;
+  (2) `Product.Category` → `Category (Id, Name)`; (3) `Product` rebuilt with fresh
+  `uuid4` ids + `BrandId`/`CategoryId`; (4) `SellerName` → `Seller`; (5) `SellerProduct`
+  rebuilt as `(SellerId, ProductId, ExternalSku)` with `PRIMARY KEY (SellerId, ProductId)`
+  and `UNIQUE (SellerId, ExternalSku)`, remapping FKs through the id maps.
 - `Brand` and `Category` are reference tables (nullable FK), not junctions.
 - All feed writes are idempotent so a re-run against a previous output is safe.
 - `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.

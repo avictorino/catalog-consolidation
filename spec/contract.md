@@ -121,7 +121,9 @@ this point.
 - All statements that carry external data are parameterized (Core does this by construction).
 - `SellerProduct` identity is `(SellerId, ProductId)`; `UNIQUE (SellerId, ExternalSku)`
   is also enforced. Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
-- `Brand` and `Seller` rows are created on demand, keyed by their `UNIQUE` `Name`.
+- Every primary key is a `uuid4` string, minted in Python; there is no `AUTOINCREMENT`.
+- `Brand`, `Category`, and `Seller` rows are created on demand, keyed by their `UNIQUE`
+  `Name`.
 - On any failure (network, JSON, validation, database), the transaction is rolled back,
   the temp database is discarded, and the previous output file is left untouched.
 - A failure during the final atomic replacement also preserves the previous output.
@@ -130,7 +132,8 @@ this point.
 
 The given model is compromised: denormalized `SellerName`, `Product.Brand`,
 `Product.Category`; mistyped `SellerProductId`; a pointless surrogate key; no
-uniqueness. It **is really altered**, not shadowed.
+uniqueness; enumerable `AUTOINCREMENT` keys. Both given tables **are really replaced**,
+not shadowed.
 
 ### Conditional migration
 
@@ -139,8 +142,8 @@ it has already produced:
 
 | Source | Classified as | Action |
 | --- | --- | --- |
-| `user_version = 0` and legacy tables present (`Product.Brand` + `Product.Category` text columns, `SellerProduct.SellerName`, `SellerProduct.SellerProductId`, no `Brand`/`Category` tables) | legacy | run the migrations, then `PRAGMA user_version = 1` |
-| `user_version = 1` and target tables present (`Brand`, `Category`, `Seller`; `SellerProduct.ExternalSku`) | already migrated | skip the migrations |
+| `user_version = 0` and legacy tables present (`Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct.SellerName`, `SellerProduct.SellerProductId`, no `Brand`/`Category`/`Seller` tables) | legacy | run the migrations, then `PRAGMA user_version = 1` |
+| `user_version = 1` and target tables present (`Brand`, `Category`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct.ExternalSku`) | already migrated | skip the migrations |
 | neither | unrecognized | abort before any write, non-zero exit |
 
 The published `catalog.db` is always legacy. Running against a previous output re-applies
@@ -148,64 +151,72 @@ the feed with idempotent writes and is a no-op when the feed is unchanged.
 
 ### Target schema
 
+Every primary key is a `uuid4` stored as `TEXT`, minted in Python. No `AUTOINCREMENT`.
+
 ```sql
 CREATE TABLE Brand (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE            -- normalized brand string
+    Id   TEXT PRIMARY KEY,                -- uuid4
+    Name TEXT NOT NULL UNIQUE             -- normalized brand string
 );
 
 CREATE TABLE Category (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE            -- normalized category string
+    Id   TEXT PRIMARY KEY,                -- uuid4
+    Name TEXT NOT NULL UNIQUE             -- normalized category string
 );
 
 CREATE TABLE Product (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id         TEXT PRIMARY KEY,          -- uuid4
     Name       TEXT NOT NULL,
-    BrandId    INTEGER REFERENCES Brand (Id),
-    CategoryId INTEGER REFERENCES Category (Id)
+    BrandId    TEXT REFERENCES Brand (Id),
+    CategoryId TEXT REFERENCES Category (Id)
 );
 
 CREATE TABLE Seller (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    Id   TEXT PRIMARY KEY,                -- uuid4
     Name TEXT NOT NULL UNIQUE
 );
 
 CREATE TABLE SellerProduct (
-    SellerId    INTEGER NOT NULL REFERENCES Seller (Id),
-    ProductId   INTEGER NOT NULL REFERENCES Product (Id),
+    SellerId    TEXT NOT NULL REFERENCES Seller (Id),
+    ProductId   TEXT NOT NULL REFERENCES Product (Id),
     ExternalSku TEXT NOT NULL,
     PRIMARY KEY (SellerId, ProductId),
     UNIQUE (SellerId, ExternalSku)
 );
 ```
 
-### Kept / altered / deleted
+### Kept / replaced / deleted
 
 | Table | Change |
 | --- | --- |
-| `Product` | altered in place: `Id` (values + `sqlite_sequence` preserved) and `Name` kept; `BrandId`, `CategoryId` nullable FKs added; the `Brand` and `Category` text columns dropped after their data is migrated |
-| `SellerProduct` | dropped and recreated: `Id` gone, `SellerName` → `Seller`, `SellerProductId` (INTEGER) → `ExternalSku` (TEXT), `ProductId` kept; new composite PK and `UNIQUE (SellerId, ExternalSku)` |
-| `Brand`, `Category`, `Seller` | created |
+| `Product` | dropped and recreated: `Name` carried over for all 975 rows; `Id` becomes a fresh `uuid4` (old integer id discarded); `Brand` / `Category` text columns replaced by `BrandId` / `CategoryId` FKs |
+| `SellerProduct` | dropped and recreated: `Id` gone, `SellerName` → `Seller`, `SellerProductId` (INTEGER) → `ExternalSku` (TEXT), `ProductId` becomes a UUID FK; new composite PK and `UNIQUE (SellerId, ExternalSku)` |
+| `Brand`, `Category`, `Seller` | created (UUID PKs) |
+
+The `INTEGER` → `TEXT` PK change forces a rebuild in SQLite, so `Product` is rebuilt in
+the same pass that folds in the reference tables — nothing is altered in place.
 
 ### Migration steps (all inside the import transaction, `foreign_keys = OFF`)
 
-Each extraction reads distinct values, folds them with the shared Python normalizer, and
-inserts via SQLAlchemy Core (not a pure `INSERT ... SELECT`).
+Staged tables are built alongside the originals, then swapped in. Each extraction reads
+distinct values, builds a `{normalized_value: uuid}` map in Python, and inserts via
+SQLAlchemy Core (not a pure `INSERT ... SELECT`).
 
-1. **`Product.Brand` → `Brand`**: `CREATE TABLE Brand`; insert distinct normalized
-   non-empty brands; `ALTER TABLE Product ADD COLUMN BrandId INTEGER REFERENCES Brand (Id)`;
-   `UPDATE Product SET BrandId = <lookup>` (`NULL` when brand null/empty);
-   `ALTER TABLE Product DROP COLUMN Brand`.
-2. **`Product.Category` → `Category`**: same shape, producing `CategoryId` and dropping
-   `Product.Category`.
-3. **`SellerProduct` rebuild** (PK changes → staged table, not `ALTER`): `CREATE TABLE Seller`;
-   insert distinct `SellerName`; `CREATE TABLE SellerProduct_new (...)`; copy rows via the
-   seller-name join, `CAST(SellerProductId AS TEXT)` into `ExternalSku`; drop the old table;
-   rename. Base table empty → the row copy is a no-op but is written to work with data.
-4. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
+1. **`Product.Brand` → `Brand`**: insert `(uuid4(), name)` per distinct normalized
+   non-empty brand; keep the brand map.
+2. **`Product.Category` → `Category`**: same; keep the category map.
+3. **`Product` rebuild**: `Product_new`; per old row insert
+   `(uuid4(), Name, brand_map.get(...), category_map.get(...))`; keep `{old_int_id: new_uuid}`.
+4. **`SellerProduct.SellerName` → `Seller`**: insert `(uuid4(), name)` per distinct
+   `SellerName` (base table empty → 0 rows).
+5. **`SellerProduct` rebuild**: `SellerProduct_new`; copy each old row as
+   `(seller_map[SellerName], product_map[ProductId], CAST(SellerProductId AS TEXT))`
+   (base table empty → no rows; written to work with data).
+6. `DROP TABLE SellerProduct`; `DROP TABLE Product`; rename `Product_new` and
+   `SellerProduct_new` into place.
+7. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
 
-- Steps 1–4 are skipped entirely when the source is already `user_version = 1`.
+- Steps 1–7 are skipped entirely when the source is already `user_version = 1`.
 - `Brand.Name` / `Category.Name` hold the normalized form; raw spelling is not preserved.
 - WAL is not used; the published output is a self-contained database written after the
   engine is disposed.
