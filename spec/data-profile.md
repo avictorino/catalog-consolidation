@@ -65,12 +65,12 @@ feed is unchanged.
 ```sql
 CREATE TABLE Brand (
     Id   TEXT PRIMARY KEY,                -- uuid4
-    Name TEXT NOT NULL UNIQUE             -- normalized brand string
+    Name TEXT NOT NULL UNIQUE             -- capitalized normalized brand name
 );
 
 CREATE TABLE Category (
     Id   TEXT PRIMARY KEY,                -- uuid4
-    Name TEXT NOT NULL UNIQUE             -- normalized category string
+    Name TEXT NOT NULL UNIQUE             -- capitalized normalized category name
 );
 
 CREATE TABLE Product (
@@ -121,9 +121,10 @@ reads distinct values and builds an in-memory map (not a pure `INSERT ... SELECT
 
 1. **staging tables**: create `Brand`, `Category`, `Seller`, `Product_new`,
    `SellerProduct_new`.
-2. **`Product.Brand` → `Brand`**: `(uuid4(), name)` per distinct normalized non-empty
-   brand (**637** rows); keep `{normalized_brand: id}`.
-3. **`Product.Category` → `Category`**: same (**43** rows); keep `{normalized_category: id}`.
+2. **`Product.Brand` → `Brand`**: `(uuid4(), normalized_name.title())` per distinct
+   normalized non-empty brand (**637** rows); keep `{normalized_brand: id}`.
+3. **`Product.Category` → `Category`**: same (**43** rows), with a title-cased persisted
+   name; keep `{normalized_category: id}`.
 4. **`Product` rebuild**: fill `Product_new`; per old row `(uuid4(), Name,
    brand_map.get(...), category_map.get(...))`; keep `{old_int_id: new_uuid}`.
 5. **`SellerProduct` rebuild**: extract `SellerName` → `Seller` (`(uuid4(), name)` per

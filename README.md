@@ -116,8 +116,8 @@ remote content may change.
   products, the worst case visits about `N × M` records. Indexed candidate reduction
   (FTS5 / trigram) is deliberately out of scope for this iteration.
 - `difflib.SequenceMatcher` can be quadratic in string length.
-- The refactor canonicalizes catalog brand and category spelling to the normalized
-  form; human-readable `DisplayName` columns are future work.
+- The refactor canonicalizes catalog brand and category spelling to a title-cased
+  normalized form; human-readable `DisplayName` columns are future work.
 - UUID `TEXT` primary keys cost index size and insert locality versus integer keys;
   fine at this volume, but `BLOB(16)` / UUIDv7 would be the move if it mattered.
 - The `libinjection` screen may in principle reject a legitimate product whose text

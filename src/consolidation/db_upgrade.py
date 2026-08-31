@@ -45,14 +45,14 @@ Brand = Table(
     "Brand",
     metadata,
     Column("Id", String, primary_key=True),  # uuid4
-    Column("Name", String, nullable=False, unique=True),  # normalized brand string
+    Column("Name", String, nullable=False, unique=True),  # capitalized normalized name
 )
 
 Category = Table(
     "Category",
     metadata,
     Column("Id", String, primary_key=True),  # uuid4
-    Column("Name", String, nullable=False, unique=True),  # normalized category string
+    Column("Name", String, nullable=False, unique=True),  # capitalized normalized name
 )
 
 Seller = Table(
@@ -205,7 +205,7 @@ def _extract_reference(conn: Connection, column: Literal["Brand", "Category"]) -
             continue
         new_id = new_uuid()
         mapping[norm] = new_id
-        to_insert.append({"Id": new_id, "Name": norm})
+        to_insert.append({"Id": new_id, "Name": norm.title()})
     if to_insert:
         conn.execute(text(insert_sql), to_insert)
     logger.info("extracted reference table=%s rows=%d", column, len(to_insert))
