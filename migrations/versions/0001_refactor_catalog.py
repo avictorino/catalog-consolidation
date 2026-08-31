@@ -32,6 +32,7 @@ def upgrade() -> None:
     db_upgrade.create_staging_tables(conn)
     brand_map = db_upgrade.extract_brands(conn)
     category_map = db_upgrade.extract_categories(conn)
+    db_upgrade.extract_product_sellers(conn)
     product_id_map = db_upgrade.rebuild_product(conn, brand_map, category_map)
     db_upgrade.rebuild_seller_product(conn, product_id_map)
     db_upgrade.swap_tables(conn)
