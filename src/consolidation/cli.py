@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
-from consolidation import usecase
+from consolidation import infrastructure, usecase
 
 logger = logging.getLogger("consolidation")
 
@@ -114,7 +114,16 @@ def main(argv: list[str] | None = None) -> int:
         config["matcher"],
         config["threshold"],
     )
-    return usecase.ConsolidateCatalogUseCase(**config).execute()
+    # Composition root: build the injected similarity backend here, then hand the
+    # use case a ready instance (it never touches the factory itself).
+    similarity = infrastructure.build_similarity(config["matcher"])
+    return usecase.ConsolidateCatalogUseCase(
+        catalog_url=config["catalog_url"],
+        products_url=config["products_url"],
+        output=config["output"],
+        similarity=similarity,
+        threshold=config["threshold"],
+    ).execute()
 
 
 if __name__ == "__main__":

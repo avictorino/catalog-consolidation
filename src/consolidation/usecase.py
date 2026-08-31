@@ -29,7 +29,6 @@ from consolidation.domain import Product, Submission, new_uuid, normalize
 from consolidation.infrastructure import (
     FeedValidationError,
     alembic_config,
-    build_similarity,
     download_to,
     iter_feed,
     screen_entry,
@@ -214,7 +213,9 @@ class ConsolidateCatalogUseCase:
     feed through :class:`ConsolidateEntryUseCase` (one transaction per entry), and
     publish the output atomically only on success.
 
-    Construct it with the resolved configuration and call :meth:`execute`, which
+    The similarity backend is injected as an already-constructed instance — the
+    composition root (``cli``) chooses it via ``infrastructure.build_similarity``.
+    Construct with the resolved configuration and call :meth:`execute`, which
     returns a process exit code (``0`` ok, ``1`` on any failure or item failure).
     """
 
@@ -224,13 +225,13 @@ class ConsolidateCatalogUseCase:
         catalog_url: str,
         products_url: str,
         output: str | Path,
-        matcher: str,
+        similarity: Similarity,
         threshold: float,
     ) -> None:
         self.catalog_url = catalog_url
         self.products_url = products_url
         self.output = Path(output).resolve()
-        self.matcher = matcher
+        self.similarity = similarity
         self.threshold = threshold
 
     # -- public entry point --------------------------------------------- #
@@ -238,7 +239,7 @@ class ConsolidateCatalogUseCase:
         logger.info(
             "run config products_url=%s matcher=%s threshold=%s",
             self.products_url,
-            self.matcher,
+            self.similarity.name,
             self.threshold,
         )
         tmp: Path | None = None
@@ -275,8 +276,7 @@ class ConsolidateCatalogUseCase:
             self._refactor_schema(conn, trans)
             self._enable_foreign_keys(conn)
 
-            similarity = build_similarity(self.matcher)
-            report = self._consume_feed(conn, similarity)
+            report = self._consume_feed(conn)
             logger.info("feed processing complete")
             return report
         except Exception:
@@ -303,17 +303,17 @@ class ConsolidateCatalogUseCase:
         conn.commit()
         logger.info("foreign key enforcement enabled")
 
-    def _new_entry_use_case(
-        self, conn: Connection, similarity: Similarity
-    ) -> ConsolidateEntryUseCase:
+    def _new_entry_use_case(self, conn: Connection) -> ConsolidateEntryUseCase:
         """Build the per-entry use case, priming its in-memory indexes from the DB.
         Also used to rebuild them after an item transaction is rolled back."""
-        use_case = ConsolidateEntryUseCase(conn, load_catalog(conn), similarity, self.threshold)
+        use_case = ConsolidateEntryUseCase(
+            conn, load_catalog(conn), self.similarity, self.threshold
+        )
         conn.commit()
         return use_case
 
-    def _consume_feed(self, conn: Connection, similarity: Similarity) -> Report:
-        use_case = self._new_entry_use_case(conn, similarity)
+    def _consume_feed(self, conn: Connection) -> Report:
+        use_case = self._new_entry_use_case(conn)
         report = Report()
         for record_index, entry in enumerate(iter_feed(self.products_url)):
             report.processed += 1
@@ -336,7 +336,7 @@ class ConsolidateCatalogUseCase:
                         "error": f"{type(exc).__name__}: {detail}",
                     }
                 )
-                use_case = self._new_entry_use_case(conn, similarity)
+                use_case = self._new_entry_use_case(conn)
                 continue
 
             self._merge_item_report(report, item_report)

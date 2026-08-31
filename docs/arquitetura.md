@@ -55,9 +55,11 @@ falha isolada e reportada → publicação atômica do output.
 - **Adapters:** `infrastructure.DifflibSimilarity`, `infrastructure.RapidFuzzSimilarity`
   (`rapidfuzz` importado só dentro de `.score`).
 - **Fábrica:** `infrastructure.build_similarity(name)`.
-- **Composition root:** `ConsolidateCatalogUseCase` escolhe pelo nome e injeta a instância em
-  `ConsolidateEntryUseCase` → `ProductIdentityResolver`.
-- Nos testes o backend é injetado direto no construtor, sem passar pela fábrica.
+- **Composition root (`cli`):** chama `build_similarity` e passa a **instância pronta**
+  como parâmetro do construtor de `ConsolidateCatalogUseCase`, que a repassa para
+  `ConsolidateEntryUseCase` → `ProductIdentityResolver`. O use case nunca toca na fábrica.
+- Nos testes o backend é injetado direto no construtor (`similarity=DifflibSimilarity()`),
+  sem passar pela fábrica — esse é o ganho do seam.
 
 ## De / para (código anterior → DDD)
 

@@ -174,10 +174,10 @@ difference is logged at `WARNING`.
 ## Matcher layer (dependency injection)
 
 One injection point: the similarity backend. The **port** lives in the domain-services
-layer, the **adapters** in infrastructure, and the **composition root**
-(`cli` -> `ConsolidateCatalogUseCase`) picks one by name and injects the instance
-down the call chain (`ConsolidateEntryUseCase` -> `ProductIdentityResolver`). No
-DI container, no framework.
+layer, the **adapters** in infrastructure, and the **composition root** (`cli`)
+picks one by name, builds it once, and injects the instance down the call chain
+(`ConsolidateCatalogUseCase` -> `ConsolidateEntryUseCase` -> `ProductIdentityResolver`).
+No DI container, no framework.
 
 ```python
 # consolidation/services.py — the port (a domain-owned contract)
@@ -205,14 +205,17 @@ def build_similarity(name: str) -> Similarity:
         return RapidFuzzSimilarity()          # `from rapidfuzz import fuzz` happens inside .score
     raise ValueError(f"unknown matcher: {name!r} (options: difflib, rapidfuzz)")
 
-# consolidation/usecase.py — injection
-similarity = build_similarity(matcher)                     # composition root chooses
-use_case = ConsolidateEntryUseCase(conn, catalog, similarity, threshold)   # injected here
-#   -> ProductIdentityResolver(similarity, threshold)                      # ...and here
+# consolidation/cli.py — composition root: build once, inject the instance
+similarity = build_similarity(config["matcher"])
+ConsolidateCatalogUseCase(..., similarity=similarity, threshold=threshold).execute()
+#   -> ConsolidateEntryUseCase(conn, catalog, similarity, threshold)
+#   -> ProductIdentityResolver(similarity, threshold)
 ```
 
-Tests inject a backend directly (`ConsolidateEntryUseCase(conn, catalog, DifflibSimilarity(), 0.90)`),
-never touching the factory — that is the payoff of the seam.
+The use case receives an already-constructed `Similarity` and never calls the
+factory. Tests inject a backend directly
+(`ConsolidateCatalogUseCase(..., similarity=DifflibSimilarity(), threshold=0.90)`)
+— that is the payoff of the seam.
 
 Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan (975 rows;
 instant). Indexed candidate reduction is out of scope.

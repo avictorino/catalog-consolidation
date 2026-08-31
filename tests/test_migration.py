@@ -10,7 +10,7 @@ from sqlalchemy import update
 from sqlalchemy.engine import Connection
 
 from consolidation import schema, usecase
-from consolidation.infrastructure import ProductEntry
+from consolidation.infrastructure import DifflibSimilarity, ProductEntry
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -161,7 +161,7 @@ def _config(output: Path) -> dict[str, object]:
         "catalog_url": "https://example.com/catalog.db",
         "products_url": "https://example.com/ProductEntry.json",
         "output": output,
-        "matcher": "difflib",
+        "similarity": DifflibSimilarity(),
         "threshold": 0.90,
     }
 
