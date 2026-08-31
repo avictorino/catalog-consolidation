@@ -2,6 +2,11 @@
 
 Working rules for AI assistance on this repository.
 
+## Conventions
+
+- Pull request titles and descriptions are written in English, regardless of the
+  language used in chat. Commit messages and code comments are English too.
+
 ## Scope
 
 - Implement the catalog consolidation tool described in [`spec/`](spec/) and [`prd.md`](prd.md).
