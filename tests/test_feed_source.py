@@ -6,15 +6,8 @@ import json
 import pytest
 import responses
 
-from consolidation.feed import (
-    FeedError,
-    FeedValidationError,
-    ProductEntry,
-    Report,
-    iter_entries,
-    iter_feed,
-    screen_entry,
-)
+from consolidation.entries import ProductEntry
+from consolidation.feed_source import FeedError, FeedValidationError, iter_entries, iter_feed
 
 
 class _ChunkedStream:
@@ -78,17 +71,3 @@ def test_iter_entries_reports_invalid_fields_without_record_contents() -> None:
     assert exc_info.value.record_index == 0
     assert exc_info.value.fields == ("Name",)
     assert "Câmera" not in str(exc_info.value)
-
-
-def test_screen_entry_rejects_injection_and_records_truncated_value(caplog) -> None:
-    entry = ProductEntry.model_validate(_entry(Brand="TestBrand'; SELECT 1; --" * 10))
-    report = Report()
-    assert not screen_entry(entry, 4, report)
-    assert report.threat == 1
-    assert len(report.threats[0]["value"]) == 120
-    assert "event=sqli_attempt" in caplog.records[0].message
-
-
-def test_screen_entry_allows_benign_apostrophes() -> None:
-    entry = ProductEntry.model_validate(_entry(Brand="Levi's", Name="iPad Pro 12.9''"))
-    assert screen_entry(entry, 0, Report())

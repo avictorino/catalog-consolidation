@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from consolidation.repository import CatalogRepository
+from consolidation.similarity import DifflibSimilarity, RapidFuzzSimilarity, Similarity
+from consolidation.sqlite_store import CatalogRepository
 
 # A legacy catalog exercising every migration concern at tiny scale:
 # - two brands that merge on normalization (BLACK+DECKER / Black+DECKER)
@@ -62,3 +63,8 @@ def legacy_db(tmp_path: Path) -> Path:
 def migrated_db(legacy_db: Path) -> Path:
     apply_refactor(legacy_db)
     return legacy_db
+
+
+@pytest.fixture(params=(DifflibSimilarity, RapidFuzzSimilarity), ids=("difflib", "rapidfuzz"))
+def similarity(request: pytest.FixtureRequest) -> Similarity:
+    return request.param()

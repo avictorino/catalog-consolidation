@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from consolidation.repository import CatalogRepository
+from consolidation.sqlite_store import CatalogRepository
 
 
 def _classify(db_path: Path) -> str:

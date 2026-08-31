@@ -1,7 +1,7 @@
 """Alembic environment.
 
 The consolidation tool always runs migrations *online* with a connection injected by
-:class:`consolidation.repository.CatalogRepository` via ``config.attributes["connection"]``
+:class:`consolidation.sqlite_store.CatalogRepository` via ``config.attributes["connection"]``
 — so the refactor executes inside the application's setup transaction. Offline (``--sql``)
 mode and autogenerate are not used.
 """

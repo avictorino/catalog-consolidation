@@ -37,7 +37,7 @@ point — its `Similarity`-style seam takes any `is_sqli(str) -> bool`.
 and Alembic's revision-chain / autogenerate / offline (`--sql`) machinery. The refactor
 is a single [conditional migration](spec/data-profile.md#conditional-migration): one
 hand-written Alembic revision (`0001`), run programmatically by
-`consolidation.repository.CatalogRepository` with the live connection injected via
+`consolidation.sqlite_store.CatalogRepository` with the live connection injected via
 `config.attributes["connection"]` so it executes inside the setup transaction.
 Alembic's `alembic_version` table replaces a `PRAGMA user_version` guard as the
 legacy/already-migrated marker.

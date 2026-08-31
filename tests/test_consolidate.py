@@ -1,4 +1,4 @@
-"""Orchestration tests for ``pipeline.run`` using a fake ``Catalog`` (no SQLite)."""
+"""Orchestration tests for ``consolidate.run`` using a fake ``CatalogStore`` (no SQLite)."""
 
 from __future__ import annotations
 
@@ -7,13 +7,15 @@ from pathlib import Path
 
 import pytest
 
-from consolidation import pipeline
-from consolidation.feed import ProductEntry, Report
+from consolidation import consolidate
+from consolidation.config import RunConfig
+from consolidation.entries import ProductEntry
+from consolidation.report import Report
 
 ENTRY = ProductEntry(Id="sku-1", SellerName="Seller", Name="Widget", Brand="Acme", Category="Tools")
 
 
-class FakeImporter:
+class FakeWriter:
     def __init__(self, *, fail_on: set[int] | None = None) -> None:
         self.processed: list[int] = []
         self._fail_on = fail_on or set()
@@ -25,7 +27,7 @@ class FakeImporter:
         report.new += 1
 
 
-class FakeCatalog:
+class FakeStore:
     """In-memory stand-in for ``CatalogRepository`` that records the call sequence."""
 
     def __init__(
@@ -37,9 +39,9 @@ class FakeCatalog:
     ) -> None:
         self.source = source
         self.calls: list[str] = []
-        self.importer = FakeImporter(fail_on=fail_items)
+        self.writer = FakeWriter(fail_on=fail_items)
 
-    def __enter__(self) -> FakeCatalog:
+    def __enter__(self) -> FakeStore:
         self.calls.append("enter")
         return self
 
@@ -62,7 +64,7 @@ class FakeCatalog:
     @contextmanager
     def item_transaction(self):
         self.calls.append("item_txn")
-        yield self.importer
+        yield self.writer
 
 
 @pytest.fixture
@@ -73,31 +75,30 @@ def _stub_io(monkeypatch: pytest.MonkeyPatch):
         tmp.write_bytes(b"SQLite format 3\x00stub")
         return tmp
 
-    monkeypatch.setattr(pipeline, "download_to", fake_download_to)
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter([ENTRY, ENTRY, ENTRY]))
+    monkeypatch.setattr(consolidate, "download_to", fake_download_to)
+    monkeypatch.setattr(consolidate, "iter_feed", lambda _url: iter([ENTRY, ENTRY, ENTRY]))
 
 
-def _run(output: Path, factory) -> int:
-    return pipeline.run(
+def _config(output: Path) -> RunConfig:
+    return RunConfig(
         catalog_url="https://example.com/catalog.db",
         products_url="https://example.com/feed.json",
-        output=output,
+        output=str(output),
         matcher="difflib",
         threshold=0.9,
-        repository_factory=factory,
     )
 
 
 def test_happy_path_runs_stages_in_order_then_publishes(_stub_io, tmp_path: Path) -> None:
-    seen: list[FakeCatalog] = []
+    seen: list[FakeStore] = []
 
-    def factory(db_path: Path) -> FakeCatalog:
-        repo = FakeCatalog(db_path)
-        seen.append(repo)
-        return repo
+    def factory(db_path: Path) -> FakeStore:
+        store = FakeStore(db_path)
+        seen.append(store)
+        return store
 
     output = tmp_path / "out" / "catalog_output.db"
-    assert _run(output, factory) == 0
+    assert consolidate.run(_config(output), store_factory=factory) == 0
     assert output.read_bytes() == b"SQLite format 3\x00stub"
     assert seen[0].calls == [
         "enter",
@@ -110,28 +111,28 @@ def test_happy_path_runs_stages_in_order_then_publishes(_stub_io, tmp_path: Path
         "item_txn",
         "exit",
     ]
-    assert seen[0].importer.processed == [0, 1, 2]
+    assert seen[0].writer.processed == [0, 1, 2]
 
 
 def test_unrecognized_source_aborts_before_migrate(_stub_io, tmp_path: Path) -> None:
-    seen: list[FakeCatalog] = []
+    seen: list[FakeStore] = []
 
-    def factory(db_path: Path) -> FakeCatalog:
-        repo = FakeCatalog(db_path, source="unrecognized")
-        seen.append(repo)
-        return repo
+    def factory(db_path: Path) -> FakeStore:
+        store = FakeStore(db_path, source="unrecognized")
+        seen.append(store)
+        return store
 
     output = tmp_path / "out.db"
-    assert _run(output, factory) == 1
+    assert consolidate.run(_config(output), store_factory=factory) == 1
     assert not output.exists()
     assert seen[0].calls == ["enter", "classify", "exit"]
 
 
 def test_item_failure_is_isolated_and_yields_nonzero_exit(_stub_io, tmp_path: Path) -> None:
-    def factory(db_path: Path) -> FakeCatalog:
-        return FakeCatalog(db_path, fail_items={1})
+    def factory(db_path: Path) -> FakeStore:
+        return FakeStore(db_path, fail_items={1})
 
     output = tmp_path / "out.db"
     # published (exists) but exit code 1 because one item failed
-    assert _run(output, factory) == 1
+    assert consolidate.run(_config(output), store_factory=factory) == 1
     assert output.exists()

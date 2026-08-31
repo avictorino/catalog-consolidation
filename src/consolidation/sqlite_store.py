@@ -1,20 +1,18 @@
-"""``CatalogRepository`` — the single object that owns the downloaded database.
+"""SQLite + Alembic implementation of the :class:`~consolidation.ports.CatalogStore`.
 
-Every interaction with the SQLite copy goes through this module: the engine/connection
-lifecycle, source classification, the Alembic-driven schema refactor, foreign-key
-enforcement, reading the catalog into memory (``load_catalog``), and applying one
-validated feed entry at a time (``FeedImporter``). ``consolidation.pipeline`` composes
-``CatalogRepository`` through the ``Catalog`` protocol and never imports SQLAlchemy or
-Alembic itself; the pure matching logic lives in ``consolidation.resolver``.
+Owns one connection for the lifetime of a run: source classification, the
+Alembic-driven schema refactor, foreign-key enforcement, reading the catalog into
+memory (``load_catalog``), and applying one validated feed entry at a time
+(``FeedImporter``). ``consolidation.consolidate`` depends on the protocol, not on this
+module's internals.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, Protocol
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
@@ -22,16 +20,18 @@ from sqlalchemy import create_engine, insert, inspect, select
 from sqlalchemy.engine import Connection, Engine
 
 from consolidation import schema
-from consolidation.feed import ProductEntry, Report, screen_entry
-from consolidation.resolver import CatalogIndex, CatalogProduct, resolve_product
-from consolidation.schema import normalize
+from consolidation.catalog import CatalogIndex, CatalogProduct
+from consolidation.entries import ProductEntry
+from consolidation.matching import resolve_product
+from consolidation.normalize import normalize
+from consolidation.ports import SourceKind
+from consolidation.report import Report
+from consolidation.screening import screen_entry
 from consolidation.similarity import Similarity, build_similarity
 
 logger = logging.getLogger("consolidation")
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
-
-SourceKind = Literal["legacy", "migrated", "unrecognized"]
 
 
 # --------------------------------------------------------------------------- #
@@ -266,26 +266,8 @@ class FeedImporter:
 
 
 # --------------------------------------------------------------------------- #
-# The repository
+# The store
 # --------------------------------------------------------------------------- #
-class Catalog(Protocol):
-    """The database surface ``pipeline.run`` depends on (a seam for tests)."""
-
-    def __enter__(self) -> Catalog: ...
-
-    def __exit__(self, *exc: object) -> None: ...
-
-    def classify_source(self) -> SourceKind: ...
-
-    def migrate(self) -> None: ...
-
-    def enable_foreign_keys(self) -> None: ...
-
-    def prepare_import(self, *, matcher: str, threshold: float) -> None: ...
-
-    def item_transaction(self) -> AbstractContextManager[FeedImporter]: ...
-
-
 class CatalogRepository:
     """Own one SQLite connection for the lifetime of a single consolidation run."""
 

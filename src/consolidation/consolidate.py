@@ -1,4 +1,8 @@
-"""End-to-end execution of the consolidation tool."""
+"""The consolidation use case: download → refactor → import feed → publish.
+
+Written against the ``CatalogStore`` protocol; ``cli`` wires in the concrete
+``CatalogRepository``. A test can pass its own ``store_factory``.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +10,12 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from consolidation.feed import FeedValidationError, Report, iter_feed
-from consolidation.repository import Catalog, CatalogRepository
-from consolidation.resolver import download_to
+from consolidation.config import RunConfig
+from consolidation.downloader import download_to
+from consolidation.feed_source import FeedValidationError, iter_feed
+from consolidation.ports import CatalogStore
+from consolidation.report import Report
+from consolidation.sqlite_store import CatalogRepository
 
 logger = logging.getLogger("consolidation")
 
@@ -20,15 +27,6 @@ def _publish(tmp: Path, output: Path) -> None:
         logger.warning("replacing existing output path=%s", output)
     tmp.replace(output)
     logger.info("published output path=%s", output)
-
-
-def _merge_item_report(report: Report, item_report: Report) -> None:
-    report.new += item_report.new
-    report.linked += item_report.linked
-    report.skipped += item_report.skipped
-    report.threat += item_report.threat
-    report.skipped_entries.extend(item_report.skipped_entries)
-    report.threats.extend(item_report.threats)
 
 
 def _log_feed_summary(report: Report) -> None:
@@ -54,45 +52,41 @@ def _log_feed_summary(report: Report) -> None:
 
 
 def run(
+    config: RunConfig,
     *,
-    catalog_url: str,
-    products_url: str,
-    output: str | Path,
-    matcher: str,
-    threshold: float,
-    repository_factory: Callable[[Path], Catalog] = CatalogRepository,
+    store_factory: Callable[[Path], CatalogStore] = CatalogRepository,
 ) -> int:
     """Execute one consolidation run. Returns a process exit code."""
     logger.info(
         "run config products_url=%s matcher=%s threshold=%s",
-        products_url,
-        matcher,
-        threshold,
+        config.products_url,
+        config.matcher,
+        config.threshold,
     )
-    output = Path(output).resolve()
+    output = Path(config.output).resolve()
     tmp: Path | None = None
     report: Report | None = None
     try:
-        tmp = download_to(catalog_url, output.parent)
+        tmp = download_to(config.catalog_url, output.parent)
 
-        with repository_factory(tmp) as repo:
-            if repo.classify_source() == "unrecognized":
+        with store_factory(tmp) as store:
+            if store.classify_source() == "unrecognized":
                 raise RuntimeError("unrecognized catalog schema; aborting before any write")
 
-            repo.migrate()
-            repo.enable_foreign_keys()
-            repo.prepare_import(matcher=matcher, threshold=threshold)
+            store.migrate()
+            store.enable_foreign_keys()
+            store.prepare_import(matcher=config.matcher, threshold=config.threshold)
 
             report = Report()
-            for record_index, entry in enumerate(iter_feed(products_url)):
+            for record_index, entry in enumerate(iter_feed(config.products_url)):
                 report.processed += 1
                 if record_index == 0:
                     logger.info("first feed record received")
 
                 item_report = Report()
                 try:
-                    with repo.item_transaction() as importer:
-                        importer.process(entry, record_index, item_report)
+                    with store.item_transaction() as writer:
+                        writer.process(entry, record_index, item_report)
                 except Exception as exc:
                     report.failed += 1
                     detail = str(exc).splitlines()[0][:200] or type(exc).__name__
@@ -104,7 +98,7 @@ def run(
                     )
                     continue
 
-                _merge_item_report(report, item_report)
+                report.merge_item(item_report)
                 if report.processed % 1000 == 0:
                     logger.info("feed progress processed=%d", report.processed)
 

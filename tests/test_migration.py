@@ -9,9 +9,10 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.engine import Connection
 
-from consolidation import pipeline, repository, schema
-from consolidation.feed import ProductEntry
-from consolidation.repository import FeedImporter
+from consolidation import consolidate, schema, sqlite_store
+from consolidation.config import RunConfig
+from consolidation.entries import ProductEntry
+from consolidation.sqlite_store import FeedImporter
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -152,24 +153,24 @@ def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
         shutil.copy(legacy_db, tmp)
         return tmp
 
-    monkeypatch.setattr(pipeline, "download_to", fake_download_to)
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(()))
+    monkeypatch.setattr(consolidate, "download_to", fake_download_to)
+    monkeypatch.setattr(consolidate, "iter_feed", lambda _url: iter(()))
     return legacy_db
 
 
-def _config(output: Path) -> dict[str, object]:
-    return {
-        "catalog_url": "https://example.com/catalog.db",
-        "products_url": "https://example.com/ProductEntry.json",
-        "output": output,
-        "matcher": "difflib",
-        "threshold": 0.90,
-    }
+def _config(output: Path) -> RunConfig:
+    return RunConfig(
+        catalog_url="https://example.com/catalog.db",
+        products_url="https://example.com/ProductEntry.json",
+        output=str(output),
+        matcher="difflib",
+        threshold=0.90,
+    )
 
 
 def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Path) -> None:
     output = tmp_path / "out" / "catalog_output.db"
-    assert pipeline.run(**_config(output)) == 0
+    assert consolidate.run(_config(output)) == 0
     assert output.exists()
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _rows(output, "PRAGMA foreign_key_check") == []
@@ -208,10 +209,10 @@ def test_pipeline_imports_feed(
             }
         ),
     ]
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(consolidate, "iter_feed", lambda _url: iter(entries))
     output = tmp_path / "catalog_output.db"
 
-    assert pipeline.run(**_config(output)) == 0
+    assert consolidate.run(_config(output)) == 0
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _count(output, "Seller") == 1
     assert _count(output, "SellerProduct") == 1
@@ -259,12 +260,12 @@ def test_pipeline_isolates_item_failure_and_logs_it(
             raise RuntimeError("injected item failure")
         original_process(self, entry, record_index, report)
 
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(consolidate, "iter_feed", lambda _url: iter(entries))
     monkeypatch.setattr(FeedImporter, "process", fail_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.ERROR, logger="consolidation"):
-        result = pipeline.run(**_config(output))
+        result = consolidate.run(_config(output))
 
     assert result == 1
     assert output.exists()
@@ -344,12 +345,12 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
             self.conn.execute(update(table).where(where).values({column: schema.new_uuid()}))
 
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(consolidate, "iter_feed", lambda _url: iter(entries))
     monkeypatch.setattr(FeedImporter, "process", violate_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.INFO, logger="consolidation"):
-        result = pipeline.run(**_config(output))
+        result = consolidate.run(_config(output))
 
     assert result == 1
     assert enforcement == [1, 1, 1]
@@ -397,9 +398,9 @@ def test_pipeline_aborts_before_feed_if_foreign_keys_cannot_be_enabled(
         return iter(())
 
     monkeypatch.setattr(Connection, "exec_driver_sql", ignore_enabling)
-    monkeypatch.setattr(pipeline, "iter_feed", unexpected_feed)
+    monkeypatch.setattr(consolidate, "iter_feed", unexpected_feed)
 
-    assert pipeline.run(**_config(output)) == 1
+    assert consolidate.run(_config(output)) == 1
     assert not feed_requested
     assert "foreign key enforcement could not be enabled" in caplog.text
     assert output.read_bytes() == b"previous output"
@@ -414,14 +415,14 @@ def test_pipeline_rollback_preserves_previous_output(
 
     # Let the whole refactor run, then fail before the setup transaction commits:
     # migrate() must roll the pending inserts back and leave the previous output intact.
-    real_upgrade = repository.command.upgrade
+    real_upgrade = sqlite_store.command.upgrade
 
     def upgrade_then_boom(*args: object, **kwargs: object) -> None:
         real_upgrade(*args, **kwargs)
         raise RuntimeError("injected failure after pending inserts")
 
-    monkeypatch.setattr(repository.command, "upgrade", upgrade_then_boom)
-    assert pipeline.run(**_config(output)) == 1
+    monkeypatch.setattr(sqlite_store.command, "upgrade", upgrade_then_boom)
+    assert consolidate.run(_config(output)) == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -437,7 +438,7 @@ def test_pipeline_aborts_on_unrecognized_schema(
         shutil.copy(empty, tmp)
         return tmp
 
-    monkeypatch.setattr(pipeline, "download_to", fake_download_to)
+    monkeypatch.setattr(consolidate, "download_to", fake_download_to)
     output = tmp_path / "out.db"
-    assert pipeline.run(**_config(output)) == 1
+    assert consolidate.run(_config(output)) == 1
     assert not output.exists()

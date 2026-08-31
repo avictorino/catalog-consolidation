@@ -12,20 +12,23 @@ Working rules for AI assistance on this repository.
 - Implement the catalog consolidation tool described in [`spec/`](spec/) and [`prd.md`](prd.md).
 - The specification is authoritative. If code and spec disagree, fix the code or raise
   the discrepancy — do not silently diverge.
-- Keep the surface small: a handful of modules, small functions, explicit composition.
-  One `CatalogRepository` (`consolidation.repository`) owns the downloaded database —
-  connection/transaction lifecycle, the Alembic-driven refactor, FK enforcement, and the
-  per-entry import transactions — and `pipeline.run` depends on it through the `Catalog`
-  protocol. Beyond that: no DI container, no ORM, no deep class hierarchies.
+- Small modules organised by layer, explicit composition. Pure logic (`normalize`,
+  `matching`, `catalog`, `similarity`, `entries`, `report`) imports no I/O. Adapters
+  (`sqlite_store`, `feed_source`, `screening`, `downloader`) implement the `ports`
+  protocols. The `consolidate` use case depends only on `ports` + pure logic; `cli` is
+  the composition root that wires the concrete adapters. `CatalogRepository`
+  (`consolidation.sqlite_store`) owns the downloaded database. Beyond that: no DI
+  container, no ORM, no deep class hierarchies.
 
 ## Design constraints
 
 - **DB refactor**: implement exactly as `spec/data-profile.md#refactored-database`
   specifies — do not restate the schema or the steps elsewhere. SQLAlchemy Core for the
   schema and statements (no ORM); the refactor is a single Alembic revision (`0001`)
-  driven programmatically by `CatalogRepository` with an injected connection, so it runs
-  inside the setup transaction. The declarative target schema lives in
-  `consolidation.schema`; the migration steps are the `0001` revision itself. `uuid4`
+  driven programmatically by `CatalogRepository` (`consolidation.sqlite_store`) with an
+  injected connection, so it runs inside the setup transaction. The declarative target
+  schema lives in `consolidation.schema`; the migration steps are the `0001` revision
+  itself. `uuid4`
   `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on Alembic's `alembic_version`
   marker (legacy source migrated, already-migrated source left alone, unrecognized
   schema aborts).

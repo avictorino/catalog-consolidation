@@ -1,22 +1,21 @@
-"""Streaming seller-feed parsing, validation, and SQL injection screening."""
+"""Streaming seller-feed acquisition and per-record validation (HTTP + ijson adapter)."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass, field
 from typing import BinaryIO
 
 import ijson
-import libinjection
 import requests
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import ValidationError
+
+from consolidation.entries import ProductEntry
 
 logger = logging.getLogger("consolidation")
 
 _TIMEOUT = (10, 60)
 _PROBE_SIZE = 64 * 1024
-_STRING_FIELDS = ("Id", "SellerName", "Name", "Brand", "Category")
 
 
 class FeedError(RuntimeError):
@@ -30,40 +29,6 @@ class FeedValidationError(FeedError):
         self.record_index = record_index
         self.fields = fields
         super().__init__(f"invalid feed record {record_index}: fields={','.join(fields)}")
-
-
-class ProductEntry(BaseModel):
-    """One seller listing, validated without materializing the feed."""
-
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    Id: str
-    SellerName: str
-    Name: str
-    Brand: str | None = None
-    Category: str | None = None
-
-    @field_validator("Id", "SellerName", "Name")
-    @classmethod
-    def require_non_empty(cls, value: str) -> str:
-        if not value:
-            raise ValueError("must not be empty")
-        return value
-
-
-@dataclass
-class Report:
-    """Counters and review details accumulated during one successful import."""
-
-    processed: int = 0
-    new: int = 0
-    linked: int = 0
-    skipped: int = 0
-    threat: int = 0
-    failed: int = 0
-    skipped_entries: list[dict[str, object]] = field(default_factory=list)
-    threats: list[dict[str, object]] = field(default_factory=list)
-    failures: list[dict[str, object]] = field(default_factory=list)
 
 
 class _PrefixedReader:
@@ -118,37 +83,3 @@ def iter_feed(url: str) -> Iterator[ProductEntry]:
     with requests.get(url, stream=True, timeout=_TIMEOUT) as response:
         response.raise_for_status()
         yield from iter_entries(response.raw)
-
-
-def screen_entry(entry: ProductEntry, record_index: int, report: Report) -> bool:
-    """Reject an entry when libinjection flags one of its string fields."""
-    finding: tuple[str, str, str] | None = None
-    for field_name in _STRING_FIELDS:
-        value = getattr(entry, field_name)
-        if value is None:
-            continue
-        result = libinjection.is_sql_injection(value)
-        if result.get("is_sqli") and finding is None:
-            finding = (field_name, result.get("fingerprint", ""), value[:120])
-
-    if finding is None:
-        return True
-
-    field_name, fingerprint, truncated = finding
-    report.threat += 1
-    report.threats.append(
-        {
-            "record_index": record_index,
-            "field": field_name,
-            "fingerprint": fingerprint,
-            "value": truncated,
-        }
-    )
-    logger.warning(
-        "event=sqli_attempt record=%d field=%s fingerprint=%s value=%r",
-        record_index,
-        field_name,
-        fingerprint,
-        truncated,
-    )
-    return False
