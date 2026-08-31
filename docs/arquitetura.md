@@ -10,10 +10,10 @@ Versão educacional para demonstração. O objetivo é mostrar *linguagem ubíqu
 | `src/consolidation/domain.py` | **Domínio** | Value objects (`normalize`, `new_uuid`, `brands_compatible`), entidades ricas (`Product`, `Catalog`), contrato `Submission`. Não importa nada do projeto nem bibliotecas de I/O. |
 | `src/consolidation/services.py` | **Domain services / portas** | `ProductIdentityResolver` (regra de identidade do produto) e a porta `Similarity`. |
 | `src/consolidation/repository.py` | **Repositories** | Único código que lê/escreve o banco: `BrandRepository`, `CategoryRepository`, `SellerRepository`, `ProductRepository`, `SellerListingRepository`. |
-| `src/consolidation/usecase.py` | **Aplicação (use cases)** | `ConsolidateEntryUseCase` (uma submissão do feed) e `run()` (a execução ponta a ponta). Orquestra domínio + repositories. |
+| `src/consolidation/usecase.py` | **Aplicação (use cases)** | `ConsolidateEntryUseCase` (uma submissão do feed) e `ConsolidateCatalogUseCase` (a execução ponta a ponta). Orquestra domínio + repositories. |
 | `src/consolidation/infrastructure.py` | **Infraestrutura** | Adapters: download HTTP, feed em streaming + ACL (`ProductEntry`), screen de SQL injection, backends `DifflibSimilarity`/`RapidFuzzSimilarity`, wiring do Alembic. |
 | `src/consolidation/schema.py` | **Persistência** | Metadados das tabelas (SQLAlchemy Core) e os passos da migração one-way. |
-| `src/consolidation/cli.py` | **Interface / composition root** | `argparse` + `.env`, monta a configuração e chama `usecase.run`. |
+| `src/consolidation/cli.py` | **Interface / composition root** | `argparse` + `.env`, monta a configuração e chama `ConsolidateCatalogUseCase().execute()`. |
 
 ## Regra de dependência
 
@@ -43,7 +43,7 @@ Pipeline por entrada do feed (política pura; toda persistência via repository)
 6. Vínculo → `SellerRepository.get_or_create` + `SellerListingRepository.link`
    (idempotente; respeita `UNIQUE (SellerId, ExternalSku)`).
 
-### `run(...)`
+### `ConsolidateCatalogUseCase.execute()`
 
 Download → `verify_sqlite_header` → `classify_source` → `alembic upgrade head`
 (refactor do schema) → habilita FKs → stream do feed, **uma transação por entrada**,
@@ -55,7 +55,7 @@ falha isolada e reportada → publicação atômica do output.
 - **Adapters:** `infrastructure.DifflibSimilarity`, `infrastructure.RapidFuzzSimilarity`
   (`rapidfuzz` importado só dentro de `.score`).
 - **Fábrica:** `infrastructure.build_similarity(name)`.
-- **Composition root:** `usecase.run` escolhe pelo nome e injeta a instância em
+- **Composition root:** `ConsolidateCatalogUseCase` escolhe pelo nome e injeta a instância em
   `ConsolidateEntryUseCase` → `ProductIdentityResolver`.
 - Nos testes o backend é injetado direto no construtor, sem passar pela fábrica.
 
@@ -72,4 +72,4 @@ falha isolada e reportada → publicação atômica do output.
 | `feed.Report` | `usecase.Report` (read model) |
 | `similarity.py` | porta em `services`, backends + fábrica em `infrastructure` |
 | `db_upgrade.py` | `schema.py` |
-| `pipeline.py` | `usecase.run` + `cli` (composition root) |
+| `pipeline.py` | `usecase.ConsolidateCatalogUseCase` + `cli` (composition root) |

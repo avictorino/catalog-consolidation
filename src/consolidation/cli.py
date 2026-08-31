@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         config["matcher"],
         config["threshold"],
     )
-    return usecase.run(**config)
+    return usecase.ConsolidateCatalogUseCase(**config).execute()
 
 
 if __name__ == "__main__":

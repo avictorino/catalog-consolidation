@@ -5,8 +5,9 @@ Two use cases:
 * :class:`ConsolidateEntryUseCase` — apply one validated seller submission
   (screen, resolve identity, create-or-link, record the outcome). Pure policy; all
   persistence goes through repositories.
-* :func:`run` — the end-to-end run: download, migrate, stream the feed, drive the
-  per-entry use case inside one transaction each, publish atomically.
+* :class:`ConsolidateCatalogUseCase` — the end-to-end run: download, migrate,
+  stream the feed, drive the per-entry use case inside one transaction each,
+  publish atomically.
 
 Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
 :mod:`consolidation.repository`, :mod:`consolidation.schema`,
@@ -208,146 +209,179 @@ class ConsolidateEntryUseCase:
 # --------------------------------------------------------------------------- #
 # Use case 2: the full consolidation run.
 # --------------------------------------------------------------------------- #
-def _publish(tmp: Path, output: Path) -> None:
-    """Atomically replace ``output`` with ``tmp`` (only after a fully successful run)."""
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        logger.warning("replacing existing output path=%s", output)
-    tmp.replace(output)
-    logger.info("published output path=%s", output)
+class ConsolidateCatalogUseCase:
+    """End-to-end run: download the catalog, refactor its schema, stream the seller
+    feed through :class:`ConsolidateEntryUseCase` (one transaction per entry), and
+    publish the output atomically only on success.
 
+    Construct it with the resolved configuration and call :meth:`execute`, which
+    returns a process exit code (``0`` ok, ``1`` on any failure or item failure).
+    """
 
-def _new_entry_use_case(conn, similarity, threshold: float) -> ConsolidateEntryUseCase:
-    """Rebuild in-memory indexes after an item transaction is rolled back."""
-    use_case = ConsolidateEntryUseCase(conn, load_catalog(conn), similarity, threshold)
-    conn.commit()
-    return use_case
+    def __init__(
+        self,
+        *,
+        catalog_url: str,
+        products_url: str,
+        output: str | Path,
+        matcher: str,
+        threshold: float,
+    ) -> None:
+        self.catalog_url = catalog_url
+        self.products_url = products_url
+        self.output = Path(output).resolve()
+        self.matcher = matcher
+        self.threshold = threshold
 
-
-def _merge_item_report(report: Report, item_report: Report) -> None:
-    report.new += item_report.new
-    report.linked += item_report.linked
-    report.skipped += item_report.skipped
-    report.threat += item_report.threat
-    report.skipped_entries.extend(item_report.skipped_entries)
-    report.threats.extend(item_report.threats)
-
-
-def _log_feed_summary(report: Report) -> None:
-    logger.info(
-        "feed summary processed=%d new=%d linked=%d skipped=%d threat=%d failed=%d",
-        report.processed,
-        report.new,
-        report.linked,
-        report.skipped,
-        report.threat,
-        report.failed,
-    )
-    if report.threat:
-        logger.warning("feed threats rejected=%d", report.threat)
-    if report.failures:
-        logger.error("feed item failures count=%d; details follow", report.failed)
-        for failure in report.failures:
-            logger.error(
-                "feed item failure record=%d reason=%s",
-                failure["record_index"],
-                failure["error"],
-            )
-
-
-def run(
-    *,
-    catalog_url: str,
-    products_url: str,
-    output: str | Path,
-    matcher: str,
-    threshold: float,
-) -> int:
-    """Execute one consolidation run. Returns a process exit code."""
-    logger.info(
-        "run config products_url=%s matcher=%s threshold=%s",
-        products_url,
-        matcher,
-        threshold,
-    )
-    output = Path(output).resolve()
-    tmp: Path | None = None
-    report: Report | None = None
-    try:
-        tmp = download_to(catalog_url, output.parent)
-        verify_sqlite_header(tmp)
-
-        engine = create_engine(f"sqlite:///{tmp}")
+    # -- public entry point --------------------------------------------- #
+    def execute(self) -> int:
+        logger.info(
+            "run config products_url=%s matcher=%s threshold=%s",
+            self.products_url,
+            self.matcher,
+            self.threshold,
+        )
+        tmp: Path | None = None
+        report: Report | None = None
         try:
-            with engine.connect() as conn:
-                trans = conn.begin()
-                try:
-                    source = schema.classify_source(conn)
-                    logger.info("source classified as=%s", source)
-                    if source == "unrecognized":
-                        raise RuntimeError("unrecognized catalog schema; aborting before any write")
+            tmp = download_to(self.catalog_url, self.output.parent)
+            verify_sqlite_header(tmp)
 
-                    command.upgrade(alembic_config(conn), "head")
-                    trans.commit()
-                    logger.info("schema refactor committed")
+            engine = create_engine(f"sqlite:///{tmp}")
+            try:
+                with engine.connect() as conn:
+                    report = self._process_connection(conn)
+            finally:
+                engine.dispose()
 
-                    conn.exec_driver_sql("PRAGMA foreign_keys = ON")
-                    if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
-                        raise RuntimeError("foreign key enforcement could not be enabled")
-                    conn.commit()
-                    logger.info("foreign key enforcement enabled")
-
-                    similarity = build_similarity(matcher)
-                    use_case = _new_entry_use_case(conn, similarity, threshold)
-                    report = Report()
-                    for record_index, entry in enumerate(iter_feed(products_url)):
-                        report.processed += 1
-                        if record_index == 0:
-                            logger.info("first feed record received")
-
-                        item_report = Report()
-                        item_trans = conn.begin()
-                        try:
-                            use_case.process(entry, record_index, item_report)
-                            item_trans.commit()
-                        except Exception as exc:
-                            if item_trans.is_active:
-                                item_trans.rollback()
-                            report.failed += 1
-                            detail = str(exc).splitlines()[0][:200] or type(exc).__name__
-                            report.failures.append(
-                                {
-                                    "record_index": record_index,
-                                    "error": f"{type(exc).__name__}: {detail}",
-                                }
-                            )
-                            use_case = _new_entry_use_case(conn, similarity, threshold)
-                            continue
-
-                        _merge_item_report(report, item_report)
-                        if report.processed % 1000 == 0:
-                            logger.info("feed progress processed=%d", report.processed)
-
-                    _log_feed_summary(report)
-                    logger.info("feed processing complete")
-                except Exception:
-                    if trans.is_active:
-                        trans.rollback()
-                    logger.error("setup or feed stream failed; previous output preserved")
-                    raise
+            self._publish(tmp)
+            tmp = None
+            return 1 if report and report.failed else 0
+        except FeedValidationError as exc:
+            logger.error("feed validation failed record=%d fields=%s", exc.record_index, exc.fields)
+            logger.exception("run failed")
+            return 1
+        except Exception:
+            logger.exception("run failed")
+            return 1
         finally:
-            engine.dispose()
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
 
-        _publish(tmp, output)
-        tmp = None
-        return 1 if report and report.failed else 0
-    except FeedValidationError as exc:
-        logger.error("feed validation failed record=%d fields=%s", exc.record_index, exc.fields)
-        logger.exception("run failed")
-        return 1
-    except Exception:
-        logger.exception("run failed")
-        return 1
-    finally:
-        if tmp is not None:
-            Path(tmp).unlink(missing_ok=True)
+    # -- steps --------------------------------------------------------- #
+    def _process_connection(self, conn: Connection) -> Report:
+        trans = conn.begin()
+        try:
+            self._refactor_schema(conn, trans)
+            self._enable_foreign_keys(conn)
+
+            similarity = build_similarity(self.matcher)
+            report = self._consume_feed(conn, similarity)
+            logger.info("feed processing complete")
+            return report
+        except Exception:
+            if trans.is_active:
+                trans.rollback()
+            logger.error("setup or feed stream failed; previous output preserved")
+            raise
+
+    @staticmethod
+    def _refactor_schema(conn: Connection, trans) -> None:
+        source = schema.classify_source(conn)
+        logger.info("source classified as=%s", source)
+        if source == "unrecognized":
+            raise RuntimeError("unrecognized catalog schema; aborting before any write")
+        command.upgrade(alembic_config(conn), "head")
+        trans.commit()
+        logger.info("schema refactor committed")
+
+    @staticmethod
+    def _enable_foreign_keys(conn: Connection) -> None:
+        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+        if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+            raise RuntimeError("foreign key enforcement could not be enabled")
+        conn.commit()
+        logger.info("foreign key enforcement enabled")
+
+    def _new_entry_use_case(
+        self, conn: Connection, similarity: Similarity
+    ) -> ConsolidateEntryUseCase:
+        """Build the per-entry use case, priming its in-memory indexes from the DB.
+        Also used to rebuild them after an item transaction is rolled back."""
+        use_case = ConsolidateEntryUseCase(conn, load_catalog(conn), similarity, self.threshold)
+        conn.commit()
+        return use_case
+
+    def _consume_feed(self, conn: Connection, similarity: Similarity) -> Report:
+        use_case = self._new_entry_use_case(conn, similarity)
+        report = Report()
+        for record_index, entry in enumerate(iter_feed(self.products_url)):
+            report.processed += 1
+            if record_index == 0:
+                logger.info("first feed record received")
+
+            item_report = Report()
+            item_trans = conn.begin()
+            try:
+                use_case.process(entry, record_index, item_report)
+                item_trans.commit()
+            except Exception as exc:
+                if item_trans.is_active:
+                    item_trans.rollback()
+                report.failed += 1
+                detail = str(exc).splitlines()[0][:200] or type(exc).__name__
+                report.failures.append(
+                    {
+                        "record_index": record_index,
+                        "error": f"{type(exc).__name__}: {detail}",
+                    }
+                )
+                use_case = self._new_entry_use_case(conn, similarity)
+                continue
+
+            self._merge_item_report(report, item_report)
+            if report.processed % 1000 == 0:
+                logger.info("feed progress processed=%d", report.processed)
+
+        self._log_feed_summary(report)
+        return report
+
+    def _publish(self, tmp: Path) -> None:
+        """Atomically replace the output with ``tmp`` (only after a successful run)."""
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        if self.output.exists():
+            logger.warning("replacing existing output path=%s", self.output)
+        tmp.replace(self.output)
+        logger.info("published output path=%s", self.output)
+
+    # -- report helpers ---------------------------------------------- #
+    @staticmethod
+    def _merge_item_report(report: Report, item_report: Report) -> None:
+        report.new += item_report.new
+        report.linked += item_report.linked
+        report.skipped += item_report.skipped
+        report.threat += item_report.threat
+        report.skipped_entries.extend(item_report.skipped_entries)
+        report.threats.extend(item_report.threats)
+
+    @staticmethod
+    def _log_feed_summary(report: Report) -> None:
+        logger.info(
+            "feed summary processed=%d new=%d linked=%d skipped=%d threat=%d failed=%d",
+            report.processed,
+            report.new,
+            report.linked,
+            report.skipped,
+            report.threat,
+            report.failed,
+        )
+        if report.threat:
+            logger.warning("feed threats rejected=%d", report.threat)
+        if report.failures:
+            logger.error("feed item failures count=%d; details follow", report.failed)
+            for failure in report.failures:
+                logger.error(
+                    "feed item failure record=%d reason=%s",
+                    failure["record_index"],
+                    failure["error"],
+                )

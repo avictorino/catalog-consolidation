@@ -174,9 +174,10 @@ difference is logged at `WARNING`.
 ## Matcher layer (dependency injection)
 
 One injection point: the similarity backend. The **port** lives in the domain-services
-layer, the **adapters** in infrastructure, and the **composition root** (`cli` ->
-`usecase.run`) picks one by name and injects the instance down the call chain
-(`ConsolidateEntryUseCase` -> `ProductIdentityResolver`). No DI container, no framework.
+layer, the **adapters** in infrastructure, and the **composition root**
+(`cli` -> `ConsolidateCatalogUseCase`) picks one by name and injects the instance
+down the call chain (`ConsolidateEntryUseCase` -> `ProductIdentityResolver`). No
+DI container, no framework.
 
 ```python
 # consolidation/services.py — the port (a domain-owned contract)
