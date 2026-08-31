@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from alembic import context
 
-from consolidation import database
+from consolidation import db_upgrade
 
 config = context.config
 
@@ -25,7 +25,7 @@ def run_migrations_online() -> None:
 
     context.configure(
         connection=connection,
-        target_metadata=database.metadata,
+        target_metadata=db_upgrade.metadata,
         transaction_per_migration=False,
         transactional_ddl=False,
     )

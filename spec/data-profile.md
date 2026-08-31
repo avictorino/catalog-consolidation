@@ -47,7 +47,7 @@ no `AUTOINCREMENT`.
 ### Conditional migration
 
 Keyed on Alembic's `alembic_version` table, so the tool can also run against a database
-it has already produced. `consolidation.database.classify_source` inspects the table
+it has already produced. `consolidation.db_upgrade.classify_source` inspects the table
 shape first and rejects an unrecognized schema before Alembic is invoked.
 
 | Detected source | Classified as | Action |
@@ -112,7 +112,7 @@ product genuinely has many sellers.
 ### Migration steps
 
 Revision `0001` (`migrations/versions/0001_refactor_catalog.py`) delegates to the
-helpers in `consolidation.database`. Staged tables are built alongside the originals
+helpers in `consolidation.db_upgrade`. Staged tables are built alongside the originals
 then swapped in. FK enforcement is not toggled — SQLite's `PRAGMA foreign_keys` is a
 no-op inside a transaction and the whole refactor runs in one — so SQLAlchemy's default
 (FK enforcement off) stands during the rebuild and `PRAGMA foreign_key_check` validates

@@ -1,7 +1,7 @@
-"""Database layer: target schema, source classification, and the schema refactor.
+"""Schema upgrade: target schema, source classification, and the refactor steps.
 
-Everything that touches tables lives here — the declarative target schema (SQLAlchemy
-Core ``Table`` metadata), the ``PRAGMA``/introspection that classifies a downloaded
+Everything that reshapes the database lives here — the declarative target schema
+(SQLAlchemy Core ``Table`` metadata), the introspection that classifies a downloaded
 database, and the data-migration helpers the Alembic revision calls to build the new
 model, copy data between tables, and drop the denormalized columns.
 
@@ -27,7 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Connection
 
-from consolidation.normalize import normalize
+from consolidation.util import normalize
 
 logger = logging.getLogger("consolidation")
 

@@ -17,9 +17,8 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine
 
-from consolidation import database
-from consolidation.config import Config
-from consolidation.download import download_to, verify_sqlite_header
+from consolidation import db_upgrade
+from consolidation.util import download_to, verify_sqlite_header
 
 logger = logging.getLogger("consolidation")
 
@@ -43,12 +42,25 @@ def _publish(tmp: Path, output: Path) -> None:
     logger.info("published output path=%s", output)
 
 
-def run(config: Config) -> int:
+def run(
+    *,
+    catalog_url: str,
+    products_url: str,
+    output: str | Path,
+    matcher: str,
+    threshold: float,
+) -> int:
     """Execute one consolidation run. Returns a process exit code."""
-    output = config.output.resolve()
+    logger.info(
+        "run config products_url=%s matcher=%s threshold=%s (feed import: PR #3)",
+        products_url,
+        matcher,
+        threshold,
+    )
+    output = Path(output).resolve()
     tmp: Path | None = None
     try:
-        tmp = download_to(config.catalog_url, output.parent)
+        tmp = download_to(catalog_url, output.parent)
         verify_sqlite_header(tmp)
 
         engine = create_engine(f"sqlite:///{tmp}")
@@ -56,7 +68,7 @@ def run(config: Config) -> int:
             with engine.connect() as conn:
                 trans = conn.begin()
                 try:
-                    source = database.classify_source(conn)
+                    source = db_upgrade.classify_source(conn)
                     logger.info("source classified as=%s", source)
                     if source == "unrecognized":
                         raise RuntimeError("unrecognized catalog schema; aborting before any write")

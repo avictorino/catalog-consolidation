@@ -7,7 +7,7 @@ Normative contract for the consolidation tool. Acceptance criteria are in
 
 Entry point: `python -m consolidation.cli`.
 
-| Option | `.env` key | Shipped default | Meaning |
+| Option | `.env` key | `.env.example` value | Meaning |
 | --- | --- | --- | --- |
 | `--catalog-url` | `CATALOG_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db` | HTTP(S) URL of the base SQLite catalog |
 | `--products-url` | `PRODUCTS_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json` | HTTP(S) URL of the seller feed |
@@ -19,21 +19,18 @@ Entry point: `python -m consolidation.cli`.
   are not supported in this version.
 - A non-TLS `http://` URL is allowed but logged as a warning.
 
-### Configuration precedence
+### Configuration resolution
 
-`CLI argument > environment variable > .env file > built-in fallback`
+Configuration is deliberately small: for each option, a **CLI flag overrides the value
+in `.env`**. There is no environment-variable layer and there are no built-in fallbacks.
 
-Every option has its default set in `.env` (copied from `.env.example`), so a plain
-`python -m consolidation.cli` with the shipped `.env` runs against the S3 sources with
-`difflib` at `0.90`. The built-in fallback constants match those values and apply only
-when `.env` and the environment are both silent.
-
-- Environment variables: `CATALOG_URL`, `PRODUCTS_URL`, `OUTPUT`, `MATCHER`, `THRESHOLD`.
-- `.env` is looked up next to the application entry point, so it is found regardless of
-  the current working directory. `.env` is optional; its absence is not an error.
-- A `THRESHOLD` in `.env` or the environment overrides each backend's
-  `suggested_threshold`; both shipped backends suggest `0.90`, so the shipped `.env`
-  is consistent with either.
+- `.env` (copied from `.env.example`) is looked up next to the `consolidation` package,
+  so it is found regardless of the current working directory.
+- If an option is set in **neither** the CLI nor `.env`, the run is invalid: an
+  `ERROR` is logged and the process exits non-zero before any work starts. A missing
+  `.env` file is treated the same as an empty one.
+- Invalid values (unknown `--matcher`, non-float or out-of-range `--threshold`, a
+  non-HTTP(S) URL) are also logged as `ERROR` and abort the run.
 
 ## 2. Input validation (seller feed)
 

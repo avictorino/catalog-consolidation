@@ -21,10 +21,9 @@ tool must still be correct.
 
 - With the shipped `.env`, a bare `python -m consolidation.cli` resolves to the S3
   sources, `catalog_output.db`, `difflib`, threshold `0.90`.
-- Every option has a key in `.env`; precedence holds: CLI > env var > `.env` > built-in
-  fallback.
-- Removing `.env` entirely still resolves the same values from the built-in fallbacks.
-- A `THRESHOLD` in `.env` or the environment overrides the backend's suggested value.
+- Every option has a key in `.env`; precedence holds: CLI > `.env`.
+- Removing `.env` entirely invalidates a bare run before any work starts.
+- A `THRESHOLD` in `.env` or the CLI overrides the backend's suggested value.
 - `.env` is located relative to the entry point even when the process runs from another
   directory.
 - A non-TLS `http://` source URL produces a `WARNING` and still runs.

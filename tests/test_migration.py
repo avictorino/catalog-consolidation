@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from consolidation import database, pipeline
-from consolidation.config import Config
+from consolidation import db_upgrade, pipeline
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -91,19 +90,19 @@ def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
     return legacy_db
 
 
-def _config(output: Path) -> Config:
-    return Config(
-        catalog_url="https://example.com/catalog.db",
-        products_url="https://example.com/ProductEntry.json",
-        output=output,
-        matcher="difflib",
-        threshold=0.90,
-    )
+def _config(output: Path) -> dict[str, object]:
+    return {
+        "catalog_url": "https://example.com/catalog.db",
+        "products_url": "https://example.com/ProductEntry.json",
+        "output": output,
+        "matcher": "difflib",
+        "threshold": 0.90,
+    }
 
 
 def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Path) -> None:
     output = tmp_path / "out" / "catalog_output.db"
-    assert pipeline.run(_config(output)) == 0
+    assert pipeline.run(**_config(output)) == 0
     assert output.exists()
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _rows(output, "PRAGMA foreign_key_check") == []
@@ -119,8 +118,8 @@ def test_pipeline_rollback_preserves_previous_output(
     def boom(conn) -> None:
         raise RuntimeError("injected failure after pending inserts")
 
-    monkeypatch.setattr(database, "foreign_key_check", boom)
-    assert pipeline.run(_config(output)) == 1
+    monkeypatch.setattr(db_upgrade, "foreign_key_check", boom)
+    assert pipeline.run(**_config(output)) == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -138,5 +137,5 @@ def test_pipeline_aborts_on_unrecognized_schema(
 
     monkeypatch.setattr(pipeline, "download_to", fake_download_to)
     output = tmp_path / "out.db"
-    assert pipeline.run(_config(output)) == 1
+    assert pipeline.run(**_config(output)) == 1
     assert not output.exists()

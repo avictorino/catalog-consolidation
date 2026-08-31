@@ -5,14 +5,14 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 
-from consolidation import database
+from consolidation import db_upgrade
 
 
 def _classify(db_path: Path) -> str:
     engine = create_engine(f"sqlite:///{db_path}")
     try:
         with engine.connect() as conn:
-            return database.classify_source(conn)
+            return db_upgrade.classify_source(conn)
     finally:
         engine.dispose()
 
@@ -42,6 +42,6 @@ def test_classify_unrecognized_partial(tmp_path: Path) -> None:
 
 
 def test_new_uuid_shape() -> None:
-    value = database.new_uuid()
+    value = db_upgrade.new_uuid()
     assert len(value) == 36
     assert value.count("-") == 4

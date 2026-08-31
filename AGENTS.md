@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Working rules for AI assistance on this repository.
 
