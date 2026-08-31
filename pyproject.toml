@@ -10,6 +10,8 @@ dependencies = [
     "pydantic==2.10.4",
     "rapidfuzz==3.11.0",
     "python-dotenv==1.2.2",
+    "libinjection-python==1.1.6",
+    "SQLAlchemy==2.0.36",
 ]
 
 [project.scripts]

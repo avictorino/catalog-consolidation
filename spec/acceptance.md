@@ -6,11 +6,13 @@ Against the currently published sources, with either matcher backend:
 
 | Metric | Value | Derivation |
 | --- | --- | --- |
-| `Product` rows after import | **976** | 975 base + 1 new (`Security Test Product`) |
+| `Brand` rows after import | **637** | distinct normalized catalog brands (`BLACK+DECKER`/`Black+Decker` and `Simplehuman`/`simplehuman` each merge); no new brands from the feed |
+| `Product` rows after import | **975** | base 975; the only new-product candidate (`Security Test Product`) is rejected as a threat. 119 rows have `BrandId IS NULL` |
 | `Seller` rows after import | **20** | distinct `SellerName` values in the feed |
-| `SellerProduct` rows after import | **257** | distinct `(SellerId, ProductId)` pairs; 12 feed entries are a seller re-offering a product it already has (different feed `Id`, name variant) |
-| New products | 1 | only `Security Test Product`; PT→EN name variants match existing products |
-| Skipped entries | 0 | no ambiguous multi-candidate or brand-conflict case in the current data |
+| `SellerProduct` rows after import | **256** | distinct `(SellerId, ProductId)`; 12 feed entries re-offer a product the seller already has (11 log `duplicate_listing`), 1 entry is a threat |
+| `new` | 0 | PT→EN name variants match existing products; the one genuine new product is a threat |
+| `skipped` | 0 | no ambiguous multi-candidate, brand-conflict, or SKU-conflict case in the current data |
+| `threat` | 1 | `MegaStore` / `"Security Test Product"` — `Brand = "TestBrand'; SELECT 1; --"` |
 
 Treated as a check, not a guarantee: if the remote content changes, the numbers change.
 The tool must still be correct; only this table becomes stale.
@@ -19,8 +21,12 @@ The tool must still be correct; only this table becomes stale.
 
 ### Configuration
 
-- Defaults resolve to the S3 URLs and `catalog_output.db` in the working directory.
-- Precedence holds: CLI > env var > `.env` > default.
+- With the shipped `.env`, a bare `python -m consolidation.cli` resolves to the S3
+  sources, `catalog_output.db`, `difflib`, threshold `0.90`.
+- Every option has a key in `.env`; precedence holds: CLI > env var > `.env` > built-in
+  fallback.
+- Removing `.env` entirely still resolves the same values from the built-in fallbacks.
+- A `THRESHOLD` in `.env` or the environment overrides the backend's suggested value.
 - `.env` is located relative to the entry point even when the process runs from another
   directory.
 - A non-TLS `http://` source URL produces a `WARNING` and still runs.
@@ -30,11 +36,21 @@ The tool must still be correct; only this table becomes stale.
 - Every run downloads the base catalog again; the previous output is never read as input.
 - The base catalog is downloaded in chunks to a temp file, not held whole in memory.
 - A corrupt or non-SQLite download is rejected before any write.
-- After the refactor the database has a `Seller (Id, Name UNIQUE)` table and a
-  `SellerProduct (SellerId, ProductId)` link table with a composite primary key;
-  `Product` is byte-for-byte unchanged; `foreign_key_check` passes.
+- After the refactor the database has `Brand (Id, Name UNIQUE)`,
+  `Product (Id, Name, BrandId, Category)`, `Seller (Id, Name UNIQUE)`, and
+  `SellerProduct (SellerId, ProductId, ExternalSku)` with `PRIMARY KEY (SellerId, ProductId)`
+  and `UNIQUE (SellerId, ExternalSku)`; `foreign_key_check` passes; `user_version = 1`.
+- `Brand` holds 637 rows; every base `Product` keeps its `Id`, `Name`, `Category`, and
+  gets a `BrandId` (or `NULL`); no product row is lost.
+- The two catalog brands that differ only by case/punctuation share one `Brand` row.
+- The refactor is conditional: a legacy source (`user_version = 0`, `SellerProduct.SellerName`
+  present) is migrated; a source already at `user_version = 1` skips the migration and
+  goes straight to feed processing; an unrecognized schema aborts before any write.
+- Running the tool a second time against its own previous output (an already-migrated
+  DB) with the same feed produces logically identical tables and reports 0 `new`.
 - The refactor runs inside the same transaction as feed processing; a later failure
   rolls back the new tables too.
+- Database access is via SQLAlchemy Core; no Alembic migration files exist in the repo.
 
 ### Streaming
 
@@ -60,16 +76,22 @@ The tool must still be correct; only this table becomes stale.
 - A model/capacity difference (`128GB` vs `256GB`) → not matched, new product.
 - A constructed two-candidate case → entry skipped and reported, import continues.
 
-### Sellers and links
+### Brands, sellers and links
 
+- A brand name new to the database creates exactly one `Brand` row; brand names that
+  normalize equally share a row.
+- A product entry with `Brand = null` links/creates with `BrandId IS NULL`.
 - A seller name new to the database creates exactly one `Seller` row; the same name
-  seen again reuses it.
-- The same product offered by two different sellers produces two links.
+  reuses it.
+- The same product offered by two different sellers produces two links, each with its
+  own `ExternalSku`.
 - A seller offering the same product via several feed entries (name variants, distinct
-  feed `Id`s) produces exactly one `(SellerId, ProductId)` link.
-- Re-running the whole import produces the same `SellerProduct` contents (no duplicate
-  links).
-- The feed `Id` is not written to any table.
+  feed `Id`s) produces one `(SellerId, ProductId)` link; the first entry's `Id` is
+  stored as `ExternalSku`, the rest log `duplicate_listing`.
+- An entry whose `(SellerId, ExternalSku)` already maps to a different product is
+  skipped and reported.
+- Re-running the whole import produces the same table contents (no duplicate links).
+- `ExternalSku` holds the feed `Id` verbatim, including the malformed ones.
 
 ### Matcher backends
 
@@ -80,13 +102,24 @@ The tool must still be correct; only this table becomes stale.
 
 ### Security
 
-- SQL-like text in any field (`"TestBrand'; SELECT 1; --"`) is treated purely as data;
-  the row is inserted as an ordinary new product.
-- Referential integrity holds after the refactor; `Product` data is unchanged and any
-  pre-existing `SellerProduct` rows survive the rebuild as `(SellerId, ProductId)` links.
+- An entry with a `libinjection`-detected SQL injection payload in any string field
+  (`"TestBrand'; SELECT 1; --"`) is **rejected**: no product, no seller, no link. A
+  `WARNING` with `event=sqli_attempt`, the field name, the libinjection fingerprint,
+  and the value truncated to 120 chars is logged, and `threat` is incremented.
+- The import is not aborted by a threat; subsequent entries are still processed.
+- Benign quotes and apostrophes in legitimate data are **not** rejected: `"Levi's"` as
+  a brand and `12.9''` in a name pass the screen and are imported normally.
+- Every DB statement that carries external data uses parameterized SQL; a raw payload
+  that somehow reached persistence would still be stored as an inert string, never
+  executed.
+- Referential integrity holds after the refactor; every base `Product` survives with its
+  `Id`/`Name`/`Category` intact (only `Brand` → `BrandId`), and any pre-existing
+  `SellerProduct` rows survive the rebuild as `(SellerId, ProductId, ExternalSku)` links.
 
 ### Observability
 
-- Exit code `0` only after publication; non-zero on any failure.
-- The final summary reports `processed`, `new`, `linked`, `skipped`.
+- Exit code `0` only after publication; non-zero on any failure. Contained threats and
+  skips keep the exit code at `0`.
+- The final summary reports `processed`, `new`, `linked`, `skipped`, `threat`.
+- When `threat > 0`, a summary `WARNING` restates the count.
 - Two runs from the same sources produce logically equivalent tables.

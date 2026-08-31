@@ -4,3 +4,9 @@ ijson==3.3.0
 pydantic==2.10.4
 rapidfuzz==3.11.0
 python-dotenv==1.2.2
+SQLAlchemy==2.0.36  # Core only (no ORM, no Alembic)
+# WAF-grade SQL injection tokenizer (used by ModSecurity). Wrapper is GPLv3, the
+# libinjection core is BSD-3. No cp311/cp312 wheels yet: on those interpreters pip
+# builds from the sdist and needs a C toolchain (present on Linux/CI; on Windows use
+# MSVC build tools or run under WSL).
+libinjection-python==1.1.6
