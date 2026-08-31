@@ -121,120 +121,41 @@ this point.
 - All statements that carry external data are parameterized (Core does this by construction).
 - `SellerProduct` identity is `(SellerId, ProductId)`; `UNIQUE (SellerId, ExternalSku)`
   is also enforced. Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
-- Every primary key is a `uuid4` string, minted in Python; there is no `AUTOINCREMENT`.
 - `Brand`, `Category`, and `Seller` rows are created on demand, keyed by their `UNIQUE`
-  `Name`.
+  `Name` (id = a Python-minted `uuid4`).
 - On any failure (network, JSON, validation, database), the transaction is rolled back,
   the temp database is discarded, and the previous output file is left untouched.
 - A failure during the final atomic replacement also preserves the previous output.
 
 ## 5. Schema refactor (on the downloaded copy, before feed processing)
 
-The given model is compromised: denormalized `SellerName`, `Product.Brand`,
-`Product.Category`; mistyped `SellerProductId`; a pointless surrogate key; no
-uniqueness; enumerable `AUTOINCREMENT` keys. Both given tables **are really replaced**,
-not shadowed.
+The full target schema, the `PRAGMA user_version` guard, the kept/replaced/deleted
+breakdown, and the migration steps are defined in
+[`data-profile.md#refactored-database`](data-profile.md#refactored-database). Normative
+requirements on top of that:
 
-### Conditional migration
-
-Guarded by `PRAGMA user_version` so the tool can run incrementally against a database
-it has already produced:
-
-| Source | Classified as | Action |
-| --- | --- | --- |
-| `user_version = 0` and legacy tables present (`Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct.SellerName`, `SellerProduct.SellerProductId`, no `Brand`/`Category`/`Seller` tables) | legacy | run the migrations, then `PRAGMA user_version = 1` |
-| `user_version = 1` and target tables present (`Brand`, `Category`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct.ExternalSku`) | already migrated | skip the migrations |
-| neither | unrecognized | abort before any write, non-zero exit |
-
-The published `catalog.db` is always legacy. Running against a previous output re-applies
-the feed with idempotent writes and is a no-op when the feed is unchanged.
-
-### Target schema
-
-Every primary key is a `uuid4` stored as `TEXT`, minted in Python. No `AUTOINCREMENT`.
-
-```sql
-CREATE TABLE Brand (
-    Id   TEXT PRIMARY KEY,                -- uuid4
-    Name TEXT NOT NULL UNIQUE             -- normalized brand string
-);
-
-CREATE TABLE Category (
-    Id   TEXT PRIMARY KEY,                -- uuid4
-    Name TEXT NOT NULL UNIQUE             -- normalized category string
-);
-
-CREATE TABLE Product (
-    Id         TEXT PRIMARY KEY,          -- uuid4
-    Name       TEXT NOT NULL,
-    BrandId    TEXT REFERENCES Brand (Id),
-    CategoryId TEXT REFERENCES Category (Id)
-);
-
-CREATE TABLE Seller (
-    Id   TEXT PRIMARY KEY,                -- uuid4
-    Name TEXT NOT NULL UNIQUE
-);
-
-CREATE TABLE SellerProduct (
-    SellerId    TEXT NOT NULL REFERENCES Seller (Id),
-    ProductId   TEXT NOT NULL REFERENCES Product (Id),
-    ExternalSku TEXT NOT NULL,
-    PRIMARY KEY (SellerId, ProductId),
-    UNIQUE (SellerId, ExternalSku)
-);
-```
-
-### Kept / replaced / deleted
-
-| Table | Change |
-| --- | --- |
-| `Product` | dropped and recreated: `Name` carried over for all 975 rows; `Id` becomes a fresh `uuid4` (old integer id discarded); `Brand` / `Category` text columns replaced by `BrandId` / `CategoryId` FKs |
-| `SellerProduct` | dropped and recreated: `Id` gone, `SellerName` → `Seller`, `SellerProductId` (INTEGER) → `ExternalSku` (TEXT), `ProductId` becomes a UUID FK; new composite PK and `UNIQUE (SellerId, ExternalSku)` |
-| `Brand`, `Category`, `Seller` | created (UUID PKs) |
-
-The `INTEGER` → `TEXT` PK change forces a rebuild in SQLite, so `Product` is rebuilt in
-the same pass that folds in the reference tables — nothing is altered in place.
-
-### Migration steps (all inside the import transaction, `foreign_keys = OFF`)
-
-Staged tables are built alongside the originals, then swapped in. Each extraction reads
-distinct values, builds a `{normalized_value: uuid}` map in Python, and inserts via
-SQLAlchemy Core (not a pure `INSERT ... SELECT`).
-
-1. **`Product.Brand` → `Brand`**: insert `(uuid4(), name)` per distinct normalized
-   non-empty brand; keep the brand map.
-2. **`Product.Category` → `Category`**: same; keep the category map.
-3. **`Product` rebuild**: `Product_new`; per old row insert
-   `(uuid4(), Name, brand_map.get(...), category_map.get(...))`; keep `{old_int_id: new_uuid}`.
-4. **`SellerProduct.SellerName` → `Seller`**: insert `(uuid4(), name)` per distinct
-   `SellerName` (base table empty → 0 rows).
-5. **`SellerProduct` rebuild**: `SellerProduct_new`; copy each old row as
-   `(seller_map[SellerName], product_map[ProductId], CAST(SellerProductId AS TEXT))`
-   (base table empty → no rows; written to work with data).
-6. `DROP TABLE SellerProduct`; `DROP TABLE Product`; rename `Product_new` and
-   `SellerProduct_new` into place.
-7. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
-
-- Steps 1–7 are skipped entirely when the source is already `user_version = 1`.
-- `Brand.Name` / `Category.Name` hold the normalized form; raw spelling is not preserved.
-- WAL is not used; the published output is a self-contained database written after the
-  engine is disposed.
+- The refactor runs **inside the single import transaction** (§4), before the first
+  feed entry is processed.
+- It is **conditional**: a legacy source is migrated; an already-migrated source
+  (`user_version = 1`) is untouched; an unrecognized schema aborts before any write
+  with a non-zero exit.
+- Every primary key is a Python-minted `uuid4` `TEXT`; there is no `AUTOINCREMENT`.
+- Foreign keys are disabled for the rebuild and re-enabled after; `PRAGMA foreign_key_check`
+  must pass and `user_version` must read `1` before feed processing begins.
+- WAL is not used; the published output is self-contained, written after the engine is
+  disposed.
 
 ## 6. Matcher interface
 
-```python
-class Similarity(Protocol):
-    name: str
-    suggested_threshold: float
-    def score(self, a: str, b: str) -> float: ...   # inputs already normalized; returns [0, 1]
-```
+The `Similarity` protocol and its two implementations are defined in
+[`prd.md#matcher-layer-parameter-injection`](../prd.md#matcher-layer-parameter-injection).
+Normative requirements:
 
-- Both `Similarity` implementations must satisfy the same contract and pass the same
-  test suite.
+- Both implementations satisfy the identical `score(a, b) -> float` (`[0, 1]`) contract
+  and pass the same test suite.
 - The backend is chosen in the CLI and injected into `consolidate(...)` as a keyword
-  argument.
-- `rapidfuzz` is imported lazily; running with `--matcher difflib` must not require it.
+  argument. `rapidfuzz` is imported lazily — `--matcher difflib` must not require it.
+- `fuzz.WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
 - Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan.
 
 ## 7. Report and exit codes

@@ -2,21 +2,18 @@
 
 ## Expected result
 
-Against the currently published sources, with either matcher backend:
+Against the currently published sources, with either matcher backend, all of these must
+hold (derivation and per-entry outcomes in
+[`data-profile.md#resulting-row-counts`](data-profile.md#resulting-row-counts)):
 
-| Metric | Value | Derivation |
-| --- | --- | --- |
-| `Brand` rows after import | **637** | distinct normalized catalog brands (`BLACK+DECKER`/`Black+Decker` and `Simplehuman`/`simplehuman` each merge); no new brands from the feed |
-| `Category` rows after import | **43** | distinct normalized catalog categories (no merges); no new categories from the feed |
-| `Product` rows after import | **975** | base 975 rebuilt with fresh `uuid4` ids; the only new-product candidate (`Security Test Product`) is rejected as a threat. 119 rows have `BrandId IS NULL`, 34 have `CategoryId IS NULL` |
-| `Seller` rows after import | **20** | distinct `SellerName` values in the feed |
-| `SellerProduct` rows after import | **256** | distinct `(SellerId, ProductId)`; 12 feed entries re-offer a product the seller already has (11 log `duplicate_listing`), 1 entry is a threat |
-| `new` | 0 | PT→EN name variants match existing products; the one genuine new product is a threat |
-| `skipped` | 0 | no ambiguous multi-candidate, brand-conflict, or SKU-conflict case in the current data |
-| `threat` | 1 | `MegaStore` / `"Security Test Product"` — `Brand = "TestBrand'; SELECT 1; --"` |
+- **637** `Brand`, **43** `Category`, **975** `Product`, **20** `Seller`,
+  **256** `SellerProduct`.
+- 119 `Product` rows with `BrandId IS NULL`; 34 with `CategoryId IS NULL`.
+- Report counters: `new = 0`, `skipped = 0`, `threat = 1`
+  (`MegaStore` / `"Security Test Product"`).
 
-Treated as a check, not a guarantee: if the remote content changes, the numbers change.
-The tool must still be correct; only this table becomes stale.
+A check, not a guarantee: if the remote content changes, the numbers change but the
+tool must still be correct.
 
 ## Acceptance scenarios
 
@@ -34,28 +31,24 @@ The tool must still be correct; only this table becomes stale.
 
 ### Download and refactor
 
+Schema and steps: [`data-profile.md#refactored-database`](data-profile.md#refactored-database).
+Verify:
+
 - Every run downloads the base catalog again; the previous output is never read as input.
 - The base catalog is downloaded in chunks to a temp file, not held whole in memory.
 - A corrupt or non-SQLite download is rejected before any write.
-- After the refactor the database has `Brand (Id, Name UNIQUE)`, `Category (Id, Name UNIQUE)`,
-  `Product (Id, Name, BrandId, CategoryId)`, `Seller (Id, Name UNIQUE)`, and
-  `SellerProduct (SellerId, ProductId, ExternalSku)` with `PRIMARY KEY (SellerId, ProductId)`
-  and `UNIQUE (SellerId, ExternalSku)`; `foreign_key_check` passes; `user_version = 1`.
-- Every `Id` / FK column is a 36-char `uuid4` string; no table uses `AUTOINCREMENT` and
-  `sqlite_sequence` is empty or absent.
-- `Product` no longer has `Brand` or `Category` text columns; all 975 base rows are
-  present with their `Name` and a fresh `uuid4` `Id`, plus a `BrandId` and `CategoryId`
-  (each possibly `NULL`); no product row is lost.
-- `Brand` holds 637 rows (the two case/punctuation pairs merge); `Category` holds 43.
-- The refactor is conditional: a legacy source (`user_version = 0`, integer `Product.Id`,
-  `Product.Brand` + `Product.Category` text columns, `SellerProduct.SellerName`) is
-  migrated; a source already at `user_version = 1` skips the migrations; an unrecognized
-  schema aborts before any write.
-- Running the tool a second time against its own previous output (an already-migrated
-  DB) with the same feed produces logically identical tables and reports 0 `new`.
-- The refactor runs inside the same transaction as feed processing; a later failure
-  rolls back the new tables too.
-- Database access is via SQLAlchemy Core; no Alembic migration files exist in the repo.
+- After the refactor the database matches the target schema; `foreign_key_check` passes;
+  `user_version = 1`; every `Id` / FK is a 36-char `uuid4`; no `AUTOINCREMENT` /
+  `sqlite_sequence`.
+- All 975 base products are present (their `Name`, a fresh `uuid4` `Id`, and a `BrandId`
+  / `CategoryId` that may be `NULL`); `Brand` holds 637 rows, `Category` 43; no row lost.
+- Conditional: a legacy source is migrated; a source already at `user_version = 1` skips
+  the migration; an unrecognized schema aborts before any write.
+- Re-running against the tool's own previous output with the same feed produces
+  logically identical tables and reports 0 `new`.
+- The refactor is inside the same transaction as feed processing; a later failure rolls
+  back the new tables too.
+- No Alembic migration files exist in the repo.
 
 ### Streaming
 

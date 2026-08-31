@@ -29,30 +29,35 @@ CREATE TABLE SellerProduct (
     (no merges).
 - `SellerProduct`: **0 rows**. No index, no uniqueness constraint.
 
-### Why this model is compromised
-
-- `SellerName` is denormalized free text — the seller is an entity, not a string
-  repeated per row.
-- `Product.Brand` and `Product.Category` are denormalized the same way; `Brand` is
-  already inconsistent in the catalog.
-- `SellerProductId` is typed `INTEGER`, but the feed's identifier is a UUID string
-  (some not even valid UUIDs), reused across sellers, so it cannot be a key.
-- The surrogate `Id` on a link table is pointless; the natural key is
-  `(SellerId, ProductId)`.
-- Nothing enforces uniqueness of a seller/product pair.
-- `AUTOINCREMENT` integer keys are enumerable and need database coordination to mint.
+Why this model is compromised, the design decisions, and the accepted risks are in
+[`prd.md`](../prd.md#database-refactor). This file is the **single source of truth for
+the schema and the migration**; other documents reference this section rather than
+restating it.
 
 ## Refactored database
 
-The published `catalog.db` reports `PRAGMA user_version = 0` and has the legacy tables,
-so every normal run migrates it. The migration is conditional (guarded by
-`user_version`): a database already at `user_version = 1` with the target tables skips
-it, which keeps incremental re-runs against a previous output possible.
+Before any feed processing, the downloaded copy is refactored — both given tables
+dropped and recreated, three reference tables (`Brand`, `Category`, `Seller`) added —
+via SQLAlchemy Core (declarative `Table` metadata + DDL + `insert()`; no ORM, no
+Alembic), inside the single import transaction. Every primary key is a `uuid4` stored
+as `TEXT`, minted in Python; no `AUTOINCREMENT`.
 
-Both given tables **are really replaced** — dropped and recreated — via SQLAlchemy Core
-(declarative `Table` definitions + DDL + `insert()` statements; no ORM, no Alembic),
-inside the import transaction. Every primary key is a `uuid4` stored as `TEXT`, minted
-in Python; no `AUTOINCREMENT`.
+### Conditional migration
+
+Guarded by `PRAGMA user_version`, so the tool can also run against a database it has
+already produced.
+
+| Detected source | Classified as | Action |
+| --- | --- | --- |
+| `user_version = 0` **and** legacy tables present: `Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct` with `SellerName` + `SellerProductId`, no `Brand`/`Category`/`Seller` tables | legacy | run the migration steps, then `PRAGMA user_version = 1` |
+| `user_version = 1` **and** target tables present: `Brand`, `Category`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct` has `ExternalSku` | already migrated | skip the migration |
+| neither | unrecognized | abort before any write, non-zero exit |
+
+The published `catalog.db` is always legacy. Re-running against a previous output
+(`user_version = 1`) re-applies the feed with idempotent writes and is a no-op when the
+feed is unchanged.
+
+### Target schema
 
 ```sql
 CREATE TABLE Brand (
@@ -68,8 +73,8 @@ CREATE TABLE Category (
 CREATE TABLE Product (
     Id         TEXT PRIMARY KEY,          -- uuid4
     Name       TEXT NOT NULL,
-    BrandId    TEXT REFERENCES Brand (Id),
-    CategoryId TEXT REFERENCES Category (Id)
+    BrandId    TEXT REFERENCES Brand (Id),      -- nullable (119 base rows)
+    CategoryId TEXT REFERENCES Category (Id)    -- nullable (34 base rows)
 );
 
 CREATE TABLE Seller (
@@ -77,14 +82,18 @@ CREATE TABLE Seller (
     Name TEXT NOT NULL UNIQUE
 );
 
-CREATE TABLE SellerProduct (
+CREATE TABLE SellerProduct (             -- many-to-many link + the seller's own id
     SellerId    TEXT NOT NULL REFERENCES Seller (Id),
     ProductId   TEXT NOT NULL REFERENCES Product (Id),
-    ExternalSku TEXT NOT NULL,           -- the seller's product id (feed entry Id)
+    ExternalSku TEXT NOT NULL,            -- the feed entry's Id (opaque)
     PRIMARY KEY (SellerId, ProductId),
     UNIQUE (SellerId, ExternalSku)
 );
 ```
+
+`Brand` and `Category` are reference tables (0..1 per product → nullable FK), not
+`BrandProduct` / `CategoryProduct` junctions. `SellerProduct` is a junction because a
+product genuinely has many sellers.
 
 ### Kept / replaced / deleted
 
@@ -97,22 +106,28 @@ CREATE TABLE SellerProduct (
   composite PK and `UNIQUE (SellerId, ExternalSku)`.
 - **`Brand`**, **`Category`**, **`Seller`** — created with UUID PKs.
 
-### Migrations (staged tables, then swapped in)
+### Migration steps
+
+`PRAGMA foreign_keys = OFF` for the whole block; staged tables built alongside the
+originals then swapped in. Normalization and every `uuid4` are computed in Python, so
+each extraction reads distinct values and builds an in-memory map (not a pure
+`INSERT ... SELECT`).
 
 1. **`Product.Brand` → `Brand`**: `(uuid4(), name)` per distinct normalized non-empty
-   brand (**637**); keep the brand map.
-2. **`Product.Category` → `Category`**: same (**43**); keep the category map.
-3. **`Product` rebuild**: fresh `uuid4` per row, `Name` carried, `BrandId` / `CategoryId`
-   from the maps; keep `{old_int_id: new_uuid}`.
+   brand (**637** rows); keep `{normalized_brand: id}`.
+2. **`Product.Category` → `Category`**: same (**43** rows); keep `{normalized_category: id}`.
+3. **`Product` rebuild**: `Product_new`; per old row `(uuid4(), Name, brand_map.get(...),
+   category_map.get(...))`; keep `{old_int_id: new_uuid}`.
 4. **`SellerProduct.SellerName` → `Seller`**: `(uuid4(), name)` per distinct name (base
-   table empty → 0 rows).
-5. **`SellerProduct` rebuild**: rows remapped through the seller and product maps,
-   `SellerProductId` → `ExternalSku` as text (base table empty → 0 rows).
-6. `foreign_key_check` passes; `PRAGMA user_version = 1`.
+   table empty → 0 rows; sellers are created later from the feed).
+5. **`SellerProduct` rebuild**: `SellerProduct_new`; each old row remapped through the
+   seller and product maps, `CAST(SellerProductId AS TEXT)` → `ExternalSku` (base table
+   empty → 0 rows).
+6. `DROP` the two old tables; rename `Product_new` / `SellerProduct_new` into place.
+7. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
 
-`Brand` and `Category` are **reference tables** (a product has 0..1 of each → nullable
-FK), not junctions. A `BrandProduct` / `CategoryProduct` junction was rejected — it
-would allow a product to have two brands or two categories.
+Steps 1–7 are skipped entirely for an already-migrated source. WAL is not used; the
+output is a self-contained database written after the engine is disposed.
 
 ## Seller feed (`ProductEntry.json`)
 
@@ -159,20 +174,18 @@ The 3 entries without an exact normalized-name match:
 
 ## Field-level ambiguities observed
 
-- **Whitespace**: 60 entries contain a double space (`"Smartphone  Galaxy S23"`).
-- **Accents**: `"Câmera Canon EOS R6"` vs `"Camera Canon EOS R6"`.
-- **Inch marks**: `12.9"`, `12.9''`, `12.9`; `55"`, `55` — same product.
-- **Brand spelling**: catalog `BLACK+DECKER` vs `Black+Decker`; feed `"Levi's"` vs
-  catalog `"Levis"`. Normalizing the brand before comparison (and before building the
-  `Brand` table) resolves both.
-- **Category disagreement**: `Camera Canon EOS R6` appears with `Photography` (catalog)
-  and `Photo` (feed) — category cannot be part of identity. The two become distinct
-  `Category` rows; `Photo` is never written because the entry links to the existing
-  product and existing products are not enriched.
-- **SQL injection probe**: one entry has `Brand = "TestBrand'; SELECT 1; --"`,
-  `Name = "Security Test Product"`, `SellerName = "MegaStore"`, and one of the malformed
-  `Id`s. `libinjection` flags the brand; the entry is rejected and counted as `threat`.
-  `libinjection` does **not** flag `"Levi's"` or `12.9''`.
+The full list with the decision taken for each class is the
+[ambiguity register in `prd.md`](../prd.md#ambiguity-register-every-class-occurs-in-the-real-data).
+Data specifics found here:
+
+- **Whitespace**: 60 feed entries contain a double space (`"Smartphone  Galaxy S23"`).
+- **Brand spelling**: catalog `BLACK+DECKER` vs `Black+Decker` and `Simplehuman` vs
+  `simplehuman` (merge on normalization); feed `"Levi's"` vs catalog `"Levis"`.
+- **Category disagreement**: `Camera Canon EOS R6` — `Photography` in the catalog,
+  `Photo` in the feed → two distinct `Category` rows.
+- **SQL injection probe**: the `MegaStore` / `"Security Test Product"` entry has
+  `Brand = "TestBrand'; SELECT 1; --"` and one of the malformed `Id`s. `libinjection`
+  flags the brand (rejected, `threat`) but does **not** flag `"Levi's"` or `12.9''`.
 
 ## Resulting row counts
 

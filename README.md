@@ -12,10 +12,10 @@ introduces one, never duplicating an existing item.
 
 Project scaffolding and specification only. No application code yet.
 
-- [`prd.md`](prd.md) — product/solution design agreed up front, including the database refactor.
-- [`spec/contract.md`](spec/contract.md) — IO contract, CLI, validation, schema, matcher interface.
+- [`prd.md`](prd.md) — design rationale and decisions (why).
+- [`spec/data-profile.md`](spec/data-profile.md) — input-data profile, **the refactored schema and migration** (source of truth), and the expected result.
+- [`spec/contract.md`](spec/contract.md) — IO contract, CLI, validation, logging, and the normative refactor / matcher rules.
 - [`spec/acceptance.md`](spec/acceptance.md) — acceptance criteria and test scenarios.
-- [`spec/data-profile.md`](spec/data-profile.md) — profile of the real input data and the expected result.
 
 ## Inputs and output
 
@@ -31,51 +31,18 @@ replaced atomically, and only after a fully successful run.
 
 ## Database refactor
 
-The given model is compromised — `SellerName`, `Product.Brand`, and `Product.Category`
-are denormalized free text, `SellerProductId` is typed `INTEGER` while the feed sends
-UUID strings, the link table has a pointless surrogate key and no uniqueness
-constraint, and the keys are enumerable `AUTOINCREMENT` integers. On every run, right
-after download, both given tables **are really replaced** (SQLAlchemy Core; no ORM, no
-Alembic). Every primary key becomes a `uuid4` `TEXT`:
+The given model is compromised — denormalized seller / brand / category names, an
+`INTEGER` SKU column that should hold the feed's UUID strings, a useless surrogate key,
+and enumerable `AUTOINCREMENT` ids. On every run, right after download, both given
+tables are dropped and recreated and three reference tables — `Brand`, `Category`,
+`Seller` — are added, all with `uuid4` `TEXT` primary keys. It runs as a
+`PRAGMA user_version`-guarded conditional migration (a legacy source is migrated; an
+already-migrated one is left alone), so the tool can also be re-run against its own
+output.
 
-```sql
-CREATE TABLE Brand    (Id TEXT PRIMARY KEY, Name TEXT NOT NULL UNIQUE);  -- Id = uuid4
-CREATE TABLE Category (Id TEXT PRIMARY KEY, Name TEXT NOT NULL UNIQUE);
-
-CREATE TABLE Product (
-    Id         TEXT PRIMARY KEY,                    -- uuid4
-    Name       TEXT NOT NULL,
-    BrandId    TEXT REFERENCES Brand (Id),          -- nullable
-    CategoryId TEXT REFERENCES Category (Id)        -- nullable
-);
-
-CREATE TABLE Seller (Id TEXT PRIMARY KEY, Name TEXT NOT NULL UNIQUE);
-
-CREATE TABLE SellerProduct (              -- many-to-many link + the seller's own SKU
-    SellerId    TEXT NOT NULL REFERENCES Seller (Id),
-    ProductId   TEXT NOT NULL REFERENCES Product (Id),
-    ExternalSku TEXT NOT NULL,            -- the feed entry's Id
-    PRIMARY KEY (SellerId, ProductId),
-    UNIQUE (SellerId, ExternalSku)
-);
-```
-
-**Kept / replaced / deleted:** `Product` is dropped and recreated — `Name` carried over
-for all 975 rows, `Id` reissued as a `uuid4`, the `Brand` and `Category` text columns
-replaced by `BrandId` / `CategoryId` after a **data migration** into the new reference
-tables. `SellerProduct` is likewise dropped and recreated (`SellerName` → `Seller`,
-`SellerProductId` → `ExternalSku`, surrogate `Id` gone). `Brand`, `Category`, `Seller`
-are new. The PK type change forces a rebuild, so nothing is altered in place.
-
-`Brand` and `Category` are **reference tables** (a product has 0..1 of each → nullable
-FK), not `BrandProduct` / `CategoryProduct` junctions. `SellerProduct` stays a junction
-because a product genuinely has many sellers.
-
-The refactor is a **conditional migration** guarded by `PRAGMA user_version`: a legacy
-source (the published `catalog.db`) is migrated and stamped `user_version = 1`; a source
-already at `user_version = 1` skips straight to feed processing. Combined with idempotent
-writes, the tool can be re-run against its own output incrementally. Full rationale and
-accepted risks are in [`prd.md`](prd.md#database-refactor).
+- **Target schema, migration steps, kept/replaced/deleted:**
+  [`spec/data-profile.md#refactored-database`](spec/data-profile.md#refactored-database)
+- **Why, and the accepted risks:** [`prd.md#database-refactor`](prd.md#database-refactor)
 
 ## Planned CLI
 

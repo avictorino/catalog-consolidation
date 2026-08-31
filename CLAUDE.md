@@ -12,22 +12,14 @@ Working rules for AI assistance on this repository.
 
 ## Design constraints
 
-- Every primary key is a `uuid4` stored as `TEXT`, minted in Python. No `AUTOINCREMENT`.
-- Refactor the DB via **SQLAlchemy Core** (no ORM, no Alembic), as a **conditional
-  migration** guarded by `PRAGMA user_version`: migrate a legacy source (`user_version 0`,
-  integer `Product.Id`, `Product.Brand` + `Product.Category` columns,
-  `SellerProduct.SellerName`) then stamp `user_version = 1`; skip when already `1`; abort
-  on an unrecognized schema.
-- Both given tables are dropped and recreated (the `INTEGER` → `TEXT` PK change forces a
-  rebuild). Migrations, via staged tables: (1) `Product.Brand` → `Brand (Id, Name)`;
-  (2) `Product.Category` → `Category (Id, Name)`; (3) `Product` rebuilt with fresh
-  `uuid4` ids + `BrandId`/`CategoryId`; (4) `SellerName` → `Seller`; (5) `SellerProduct`
-  rebuilt as `(SellerId, ProductId, ExternalSku)` with `PRIMARY KEY (SellerId, ProductId)`
-  and `UNIQUE (SellerId, ExternalSku)`, remapping FKs through the id maps.
-- `Brand` and `Category` are reference tables (nullable FK), not junctions.
-- All feed writes are idempotent so a re-run against a previous output is safe.
-- `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.
-- One transaction per import (refactor + feed), never per entry.
+- **DB refactor**: implement exactly as `spec/data-profile.md#refactored-database`
+  specifies — do not restate the schema or the steps elsewhere. SQLAlchemy Core (no
+  ORM, no Alembic); `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`; runs inside the
+  single import transaction; conditional on `PRAGMA user_version`.
+- One transaction per import (refactor + feed), never per entry. All feed writes are
+  idempotent so a re-run against a previous output is safe.
+- `Brand` / `Category` are reference tables (nullable FK), not junctions.
+  `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.
 - Stream the feed: no `response.json()`, `response.content`, `list(iterator)`, or a
   local copy of the JSON.
 - Validate feed objects one at a time with Pydantic v2, then screen every string field
@@ -36,7 +28,7 @@ Working rules for AI assistance on this repository.
 - Normalization is one shared Python function (names, brands, categories).
 - The two `Similarity` backends implement the same `score(a, b) -> float` contract and
   pass the same tests. `rapidfuzz` is imported lazily.
-- `rapidfuzz.WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
+  `WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
 
 ## Verification commands
 
