@@ -367,6 +367,7 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
     assert "feed item failures count=1" in caplog.text
     assert any(
         "record=1" in record.message
+        and "reason=" in record.message
         and "IntegrityError" in record.message
         and "FOREIGN KEY constraint failed" in record.message
         for record in caplog.records

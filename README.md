@@ -60,6 +60,14 @@ HH:MM:SS [WARNING] replacing existing output path=<workspace>/catalog_output.db
 HH:MM:SS [INFO] published output path=<workspace>/catalog_output.db
 ```
 
+If a feed item cannot be persisted, the import continues and prints the failure reason
+after the feed is exhausted:
+
+```text
+HH:MM:SS [ERROR] feed item failures count=1; details follow
+HH:MM:SS [ERROR] feed item failure record=123 reason=IntegrityError: FOREIGN KEY constraint failed
+```
+
 ## Status
 
 Download, schema refactor, and feed import are implemented. The feed is streamed from
