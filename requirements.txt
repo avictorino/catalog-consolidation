@@ -1,6 +1,6 @@
 # Runtime dependencies. Pinned; exceptions must be justified in the README.
-requests==2.32.3
+requests==2.33.0
 ijson==3.3.0
 pydantic==2.10.4
 rapidfuzz==3.11.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
