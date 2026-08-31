@@ -52,12 +52,12 @@ def test_product_ids_are_uuids_and_names_preserved(legacy_db: Path) -> None:
 
 def test_brand_merge_on_normalization(migrated_db: Path) -> None:
     names = sorted(n for (n,) in _rows(migrated_db, "SELECT Name FROM Brand"))
-    assert names == ["black decker", "canon", "ikea"]
+    assert names == ["Black Decker", "Canon", "Ikea"]
     # the two BLACK+DECKER spellings collapse onto one brand row
     linked = _rows(
         migrated_db,
         "SELECT p.Name FROM Product p JOIN Brand b ON p.BrandId = b.Id "
-        "WHERE b.Name = 'black decker'",
+        "WHERE b.Name = 'Black Decker'",
     )
     assert {n for (n,) in linked} == {"Cordless Drill", "Impact Driver"}
 
