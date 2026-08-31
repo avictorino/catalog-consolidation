@@ -60,8 +60,10 @@ class Report:
     linked: int = 0
     skipped: int = 0
     threat: int = 0
+    failed: int = 0
     skipped_entries: list[dict[str, object]] = field(default_factory=list)
     threats: list[dict[str, object]] = field(default_factory=list)
+    failures: list[dict[str, object]] = field(default_factory=list)
 
 
 class _PrefixedReader:

@@ -117,17 +117,21 @@ this point.
 - Database access is through **SQLAlchemy Core** (declarative `Table` metadata,
   `insert()` / `select()` / `insert().from_select()`). No ORM. The schema refactor is a
   single Alembic revision (`0001`); no revision chain, no autogenerate, no offline mode.
-- One transaction per import — covering the schema refactor and all feed processing.
-  **Not** one transaction per entry. Alembic runs with the import connection injected
-  (`config.attributes["connection"]`) so revision `0001` executes inside that same
-  transaction.
+- The schema refactor runs in its setup transaction. Feed processing then uses one
+  transaction per entry: a successful entry is committed immediately, while an entry
+  failure is rolled back in isolation and recorded before the next entry is attempted.
+  Alembic still runs with the import connection injected
+  (`config.attributes["connection"]`).
 - All statements that carry external data are parameterized (Core does this by construction).
 - `SellerProduct` identity is `(SellerId, ProductId)`; `UNIQUE (SellerId, ExternalSku)`
   is also enforced. Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
 - `Brand`, `Category`, and `Seller` rows are created on demand, keyed by their `UNIQUE`
   `Name` (id = a Python-minted `uuid4`).
-- On any failure (network, JSON, validation, database), the transaction is rolled back,
-  the temp database is discarded, and the previous output file is left untouched.
+- On a global failure (network, JSON parsing, schema validation, database setup), the
+  temp database is discarded and the previous output file is left untouched. A feed-item
+  persistence failure rolls back only that item, is logged at the end, and later items
+  continue; the successfully processed temp database is published with a non-zero exit
+  code.
 - A failure during the final atomic replacement also preserves the previous output.
 
 ## 5. Schema refactor (on the downloaded copy, before feed processing)
@@ -180,7 +184,8 @@ Exit codes:
 - `0` only after the output has been successfully published. Contained threats and
   skips do not change this — the import still succeeded.
 - Non-zero on any failure (configuration, download, parsing, schema validation,
-  persistence, publication).
+  item persistence, publication). Item failures are reported after the feed is
+  exhausted and do not prevent successful items from being published.
 
 ## 8. Logging
 

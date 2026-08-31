@@ -46,8 +46,8 @@ Verify:
   any write.
 - Re-running against the tool's own previous output with the same feed produces
   logically identical tables and reports 0 `new`.
-- The refactor is inside the same transaction as feed processing; a later failure rolls
-  back the new tables too.
+- The schema refactor is committed before feed processing; each feed item has its own
+  transaction and a failed item rolls back without removing successful item changes.
 - Exactly one Alembic revision exists (`0001`) and it is the head; env.py refuses
   offline mode and requires an injected connection.
 
@@ -62,8 +62,9 @@ Verify:
 
 - An invalid root (object instead of array) aborts before any write.
 - A JSON document truncated mid-stream aborts; the previous output is preserved.
-- An invalid record after several pending inserts triggers a full rollback; the previous
-  output is preserved (including the schema refactor).
+- An invalid JSON record still aborts the stream safely; a persistence failure after
+  several committed items rolls back only that item, later items continue, the partial
+  result is published, and the failed record is logged at the end.
 - `[]` as the feed is valid and produces the refactored base catalog with no links.
 
 ### Identity

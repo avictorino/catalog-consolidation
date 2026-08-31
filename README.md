@@ -105,7 +105,7 @@ remote content may change.
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
 | Matcher backends | `difflib` vs `rapidfuzz`, same `score()` contract, injected at the CLI edge | clean interchangeability; no DI container |
 | Ambiguous match | skip the row and report it, do not abort the import | one ambiguous row should not hide the outcome of the rest |
-| Transaction | one per import (refactor + feed), rollback on any failure | all-or-nothing; the previous output survives a failed run |
+| Transaction | schema refactor is committed first; one transaction per feed entry | failed entries roll back in isolation, later entries continue, and failures are reported |
 
 ## Known limitations
 

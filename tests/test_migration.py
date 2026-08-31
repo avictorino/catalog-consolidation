@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import sqlite3
 from pathlib import Path
@@ -111,7 +112,7 @@ def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Pa
     assert list((tmp_path / "out").glob("*.tmp")) == []
 
 
-def test_pipeline_imports_feed_inside_transaction(
+def test_pipeline_imports_feed(
     _stub_download: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     entries = [
@@ -150,6 +151,67 @@ def test_pipeline_imports_feed_inside_transaction(
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _count(output, "Seller") == 1
     assert _count(output, "SellerProduct") == 1
+
+
+def test_pipeline_isolates_item_failure_and_logs_it(
+    _stub_download: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entries = [
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-camera",
+                "SellerName": "GardenStore",
+                "Name": "Camera Canon EOS R6",
+                "Brand": "Canon",
+                "Category": "Photography",
+            }
+        ),
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-fails",
+                "SellerName": "GardenStore",
+                "Name": "Cordless Drill",
+                "Brand": "BLACK+DECKER",
+                "Category": "Tools",
+            }
+        ),
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-driver",
+                "SellerName": "GardenStore",
+                "Name": "Impact Driver",
+                "Brand": "BLACK+DECKER",
+                "Category": "Tools",
+            }
+        ),
+    ]
+    original_process = pipeline.FeedImporter.process
+
+    def fail_one_item(self, entry, record_index, report) -> None:
+        if record_index == 1:
+            raise RuntimeError("injected item failure")
+        original_process(self, entry, record_index, report)
+
+    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(pipeline.FeedImporter, "process", fail_one_item)
+    output = tmp_path / "catalog_output.db"
+
+    with caplog.at_level(logging.ERROR, logger="consolidation"):
+        result = pipeline.run(**_config(output))
+
+    assert result == 1
+    assert output.exists()
+    assert _count(output, "Product") == PRODUCT_ROWS
+    assert _count(output, "Seller") == 1
+    assert _count(output, "SellerProduct") == 2
+    assert any("feed item failures count=1" in record.message for record in caplog.records)
+    assert any(
+        "record=1" in record.message and "injected item failure" in record.message
+        for record in caplog.records
+    )
 
 
 def test_pipeline_rollback_preserves_previous_output(
