@@ -6,6 +6,9 @@ env/
 # Environment files (local, non-versioned)
 .env
 
+# Assessment PDFs are private local references, not repository content.
+/docs/*.pdf
+
 # Python bytecode / caches
 __pycache__/
 *.py[cod]
