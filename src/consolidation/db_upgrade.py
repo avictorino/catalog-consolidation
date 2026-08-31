@@ -220,6 +220,35 @@ def extract_categories(conn: Connection) -> dict[str, str]:
     return _extract_reference(conn, "Category")
 
 
+def extract_product_sellers(conn: Connection) -> None:
+    """Copy optional legacy ``Product.Seller`` values into ``Seller.Name``.
+
+    The published legacy snapshot stores seller names on ``SellerProduct``. Some
+    legacy exports instead also carry a seller column on ``Product``; those values
+    are seller entities too, even though the target model does not retain the
+    denormalized product column.
+    """
+    product_columns = {column["name"] for column in inspect(conn).get_columns("Product")}
+    if "Seller" not in product_columns:
+        logger.info("extracted product sellers rows=0 column=absent")
+        return
+
+    existing = {name for (name,) in conn.execute(text("SELECT Name FROM Seller")).all()}
+    seller_rows: list[dict[str, str]] = []
+    for (raw_name,) in conn.execute(text("SELECT Seller FROM Product")).all():
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name or name in existing:
+            continue
+        existing.add(name)
+        seller_rows.append({"Id": new_uuid(), "Name": name})
+
+    if seller_rows:
+        conn.execute(text("INSERT INTO Seller (Id, Name) VALUES (:Id, :Name)"), seller_rows)
+    logger.info("extracted product sellers rows=%d", len(seller_rows))
+
+
 def rebuild_product(
     conn: Connection,
     brand_map: dict[str, str],
@@ -266,7 +295,10 @@ def rebuild_seller_product(conn: Connection, product_id_map: dict[int, str]) -> 
     rows = conn.execute(
         text("SELECT SellerName, ProductId, SellerProductId FROM SellerProduct")
     ).all()
-    seller_map: dict[str, str] = {}
+    seller_map = {
+        name: seller_id
+        for seller_id, name in conn.execute(text("SELECT Id, Name FROM Seller")).all()
+    }
     seller_rows: list[dict[str, str]] = []
     link_rows: list[dict[str, str]] = []
     for seller_name, old_product_id, sku in rows:

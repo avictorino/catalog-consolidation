@@ -77,6 +77,48 @@ def test_rerun_is_noop(migrated_db: Path) -> None:
     assert before == after
 
 
+def test_product_seller_values_are_copied_to_seller(tmp_path: Path) -> None:
+    db = tmp_path / "product-seller.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE Product (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                Name TEXT NOT NULL,
+                Brand TEXT,
+                Category TEXT,
+                Seller TEXT
+            );
+            CREATE TABLE SellerProduct (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                SellerName TEXT NOT NULL,
+                ProductId INTEGER NOT NULL REFERENCES Product (Id),
+                SellerProductId INTEGER NOT NULL
+            );
+            INSERT INTO Product (Name, Seller) VALUES
+                ('Product A', 'Product Seller'),
+                ('Product B', 'Product Seller'),
+                ('Product C', '  Another Seller  '),
+                ('Product D', NULL),
+                ('Product E', '');
+            INSERT INTO SellerProduct (SellerName, ProductId, SellerProductId)
+                VALUES ('Link Seller', 1, 10);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    apply_refactor(db)
+
+    assert _rows(db, "SELECT Name FROM Seller ORDER BY Name") == [
+        ("Another Seller",),
+        ("Link Seller",),
+        ("Product Seller",),
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline-level: download is stubbed to copy the fixture into place.
 # --------------------------------------------------------------------------- #

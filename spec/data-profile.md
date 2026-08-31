@@ -135,6 +135,11 @@ reads distinct values and builds an in-memory map (not a pure `INSERT ... SELECT
    distinct name), then fill `SellerProduct_new` from each old row remapped through the
    seller and product maps, `str(SellerProductId)` → `ExternalSku`. Base table empty →
    0 rows in both.
+
+   For legacy exports that also include a `Product.Seller` column, the migration copies
+   each distinct non-empty value into `Seller.Name` before rebuilding `SellerProduct`.
+   The published snapshot has no such column, so its sellers come from
+   `SellerProduct.SellerName`.
 6. `DROP` the two old tables; rename `Product_new` / `SellerProduct_new` into place;
    clear the residual `sqlite_sequence` counters.
 7. `PRAGMA foreign_key_check` (must be empty). Alembic stamps `alembic_version = 0001`.
