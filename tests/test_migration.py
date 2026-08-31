@@ -31,8 +31,14 @@ def test_target_schema_and_counts(migrated_db: Path) -> None:
     assert _count(migrated_db, "Brand") == BRAND_ROWS
     assert _count(migrated_db, "Category") == CATEGORY_ROWS
     assert _count(migrated_db, "Product") == PRODUCT_ROWS
+    assert _count(migrated_db, "ProductCategory") == 4
     assert _count(migrated_db, "Seller") == 0
     assert _count(migrated_db, "SellerProduct") == 0
+    assert [column[1] for column in _rows(migrated_db, "PRAGMA table_info(Product)")] == [
+        "Id",
+        "Name",
+        "BrandId",
+    ]
 
 
 def test_foreign_keys_and_version(migrated_db: Path) -> None:
@@ -69,14 +75,27 @@ def test_brand_merge_on_normalization(migrated_db: Path) -> None:
 def test_null_fks_preserved(migrated_db: Path) -> None:
     assert _count(migrated_db, "Product") == PRODUCT_ROWS
     assert _rows(migrated_db, "SELECT count(*) FROM Product WHERE BrandId IS NULL") == [(2,)]
-    assert _rows(migrated_db, "SELECT count(*) FROM Product WHERE CategoryId IS NULL") == [(2,)]
+    assert _rows(
+        migrated_db,
+        "SELECT count(*) FROM Product p "
+        "WHERE NOT EXISTS (SELECT 1 FROM ProductCategory pc WHERE pc.ProductId = p.Id)",
+    ) == [(2,)]
 
 
 def test_rerun_is_noop(migrated_db: Path) -> None:
-    before = _rows(migrated_db, "SELECT Id, Name, BrandId, CategoryId FROM Product ORDER BY Id")
+    before = _rows(migrated_db, "SELECT Id, Name, BrandId FROM Product ORDER BY Id")
+    before_categories = _rows(
+        migrated_db,
+        "SELECT ProductId, CategoryId FROM ProductCategory " "ORDER BY ProductId, CategoryId",
+    )
     apply_refactor(migrated_db)  # second time: source is 'migrated', upgrade head no-ops
-    after = _rows(migrated_db, "SELECT Id, Name, BrandId, CategoryId FROM Product ORDER BY Id")
+    after = _rows(migrated_db, "SELECT Id, Name, BrandId FROM Product ORDER BY Id")
+    after_categories = _rows(
+        migrated_db,
+        "SELECT ProductId, CategoryId FROM ProductCategory " "ORDER BY ProductId, CategoryId",
+    )
     assert before == after
+    assert before_categories == after_categories
 
 
 def test_product_seller_values_are_copied_to_seller(tmp_path: Path) -> None:
@@ -263,7 +282,7 @@ def test_pipeline_isolates_item_failure_and_logs_it(
     ("table_name", "column"),
     [
         ("Product", "BrandId"),
-        ("Product", "CategoryId"),
+        ("ProductCategory", "CategoryId"),
         ("SellerProduct", "SellerId"),
         ("SellerProduct", "ProductId"),
     ],
@@ -310,11 +329,17 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
         original_process(self, entry, record_index, report)
         if record_index == 1:
             table = db_upgrade.metadata.tables[table_name]
-            where = (
-                table.c.Name == entry.Name
-                if table_name == "Product"
-                else table.c.ExternalSku == entry.Id
-            )
+            if table_name == "Product":
+                where = table.c.Name == entry.Name
+            elif table_name == "ProductCategory":
+                product_id = self.conn.scalar(
+                    db_upgrade.Product.select()
+                    .with_only_columns(db_upgrade.Product.c.Id)
+                    .where(db_upgrade.Product.c.Name == entry.Name)
+                )
+                where = table.c.ProductId == product_id
+            else:
+                where = table.c.ExternalSku == entry.Id
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
             self.conn.execute(update(table).where(where).values({column: db_upgrade.new_uuid()}))
 

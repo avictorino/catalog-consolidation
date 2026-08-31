@@ -30,7 +30,8 @@ Working rules for AI assistance on this repository.
 - Foreign keys may remain disabled during the schema rebuild only. After its commit,
   enable and verify enforcement on the import connection before consuming the JSON,
   including when the source is already migrated. Abort if enforcement is unavailable.
-- `Brand` / `Category` are reference tables (nullable FK), not junctions.
+- `Brand` is a reference table with a nullable FK on `Product`; `Category` is a
+  reference table connected through the `ProductCategory` junction.
   `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.
 - Stream the feed: no `response.json()`, `response.content`, `list(iterator)`, or a
   local copy of the JSON.
@@ -53,8 +54,9 @@ python -m consolidation.cli --matcher difflib
 python -m consolidation.cli --matcher rapidfuzz
 ```
 
-Expected against the published sources, for both backends: 637 brands, 43 categories,
-975 products, 20 sellers, 256 links, 1 threat.
+Expected against the published sources, for both backends: 637 brands, 44 categories,
+975 products, 20 sellers, 256 links, 1 threat. The migration starts with 43 catalog
+categories; the feed adds `Photo`.
 
 ## Out of scope
 

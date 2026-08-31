@@ -18,6 +18,7 @@ from typing import Literal
 from sqlalchemy import (
     Column,
     ForeignKey,
+    Index,
     MetaData,
     String,
     Table,
@@ -33,7 +34,7 @@ logger = logging.getLogger("consolidation")
 
 SourceKind = Literal["legacy", "migrated", "unrecognized"]
 
-TARGET_TABLES = ("Brand", "Category", "Product", "Seller", "SellerProduct")
+TARGET_TABLES = ("Brand", "Category", "Product", "ProductCategory", "Seller", "SellerProduct")
 
 # --------------------------------------------------------------------------- #
 # Target schema (canonical names). Used for introspection and by the feed
@@ -68,8 +69,15 @@ Product = Table(
     Column("Id", String, primary_key=True),  # uuid4
     Column("Name", String, nullable=False),
     Column("BrandId", String, ForeignKey("Brand.Id")),  # nullable
-    Column("CategoryId", String, ForeignKey("Category.Id")),  # nullable
 )
+
+ProductCategory = Table(
+    "ProductCategory",
+    metadata,
+    Column("ProductId", String, ForeignKey("Product.Id"), primary_key=True, nullable=False),
+    Column("CategoryId", String, ForeignKey("Category.Id"), primary_key=True, nullable=False),
+)
+Index("ix_ProductCategory_CategoryId", ProductCategory.c.CategoryId)
 
 SellerProduct = Table(
     "SellerProduct",
@@ -113,8 +121,9 @@ def classify_source(conn: Connection) -> SourceKind:
         return "legacy"
 
     migrated = (
-        {"Brand", "Category", "Seller", "alembic_version"} <= tables
-        and {"BrandId", "CategoryId"} <= product_cols.keys()
+        {"Brand", "Category", "ProductCategory", "Seller", "alembic_version"} <= tables
+        and "BrandId" in product_cols
+        and "CategoryId" not in product_cols
         and "TEXT" in product_id_type
         and "ExternalSku" in sp_cols
     )
@@ -153,16 +162,26 @@ _STAGING_DDL = (
     """,
     """
     CREATE TABLE "Product_new" (
-        Id         TEXT PRIMARY KEY,
-        Name       TEXT NOT NULL,
-        BrandId    TEXT REFERENCES Brand (Id),
-        CategoryId TEXT REFERENCES Category (Id)
+        Id      TEXT PRIMARY KEY,
+        Name    TEXT NOT NULL,
+        BrandId TEXT REFERENCES Brand (Id)
     )
+    """,
+    """
+    CREATE TABLE "ProductCategory_new" (
+        ProductId  TEXT NOT NULL REFERENCES "Product_new" (Id),
+        CategoryId TEXT NOT NULL REFERENCES Category (Id),
+        PRIMARY KEY (ProductId, CategoryId)
+    )
+    """,
+    """
+    CREATE INDEX ix_ProductCategory_CategoryId
+        ON "ProductCategory_new" (CategoryId)
     """,
     """
     CREATE TABLE "SellerProduct_new" (
         SellerId    TEXT NOT NULL REFERENCES Seller (Id),
-        ProductId   TEXT NOT NULL REFERENCES Product (Id),
+        ProductId   TEXT NOT NULL REFERENCES "Product_new" (Id),
         ExternalSku TEXT NOT NULL,
         PRIMARY KEY (SellerId, ProductId),
         UNIQUE (SellerId, ExternalSku)
@@ -172,7 +191,7 @@ _STAGING_DDL = (
 
 
 def create_staging_tables(conn: Connection) -> None:
-    """Create ``Brand`` / ``Category`` / ``Seller`` and the two ``*_new`` staging tables."""
+    """Create reference tables and staged target tables for the refactor."""
     for ddl in _STAGING_DDL:
         conn.execute(text(ddl))
 
@@ -255,31 +274,40 @@ def rebuild_product(
     category_map: dict[str, str],
 ) -> dict[int, str]:
     """Copy every legacy ``Product`` row into ``Product_new`` with a fresh ``uuid4`` id
-    and ``Brand`` / ``Category`` text replaced by nullable FKs.
+    and ``Brand`` text replaced by a nullable FK. Legacy categories are copied into
+    ``ProductCategory_new`` as one association per product when present.
 
     Returns ``{old_int_id: new_uuid}``.
     """
     rows = conn.execute(text("SELECT Id, Name, Brand, Category FROM Product")).all()
     id_map: dict[int, str] = {}
     batch: list[dict[str, str | None]] = []
+    category_links: list[dict[str, str]] = []
     for old_id, name, brand, category in rows:
         new_id = new_uuid()
         id_map[old_id] = new_id
+        category_id = category_map.get(normalize(category))
         batch.append(
             {
                 "Id": new_id,
                 "Name": name,
                 "BrandId": brand_map.get(normalize(brand)),
-                "CategoryId": category_map.get(normalize(category)),
             }
         )
+        if category_id:
+            category_links.append({"ProductId": new_id, "CategoryId": category_id})
     if batch:
         conn.execute(
-            text(
-                'INSERT INTO "Product_new" (Id, Name, BrandId, CategoryId) '
-                "VALUES (:Id, :Name, :BrandId, :CategoryId)"
-            ),
+            text('INSERT INTO "Product_new" (Id, Name, BrandId) ' "VALUES (:Id, :Name, :BrandId)"),
             batch,
+        )
+    if category_links:
+        conn.execute(
+            text(
+                'INSERT INTO "ProductCategory_new" (ProductId, CategoryId) '
+                "VALUES (:ProductId, :CategoryId)"
+            ),
+            category_links,
         )
     logger.info("rebuilt Product rows=%d", len(batch))
     return id_map
@@ -337,6 +365,7 @@ def swap_tables(conn: Connection) -> None:
     conn.execute(text("DROP TABLE SellerProduct"))
     conn.execute(text("DROP TABLE Product"))
     conn.execute(text('ALTER TABLE "Product_new" RENAME TO "Product"'))
+    conn.execute(text('ALTER TABLE "ProductCategory_new" RENAME TO "ProductCategory"'))
     conn.execute(text('ALTER TABLE "SellerProduct_new" RENAME TO "SellerProduct"'))
     if conn.execute(
         text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'")

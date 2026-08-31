@@ -22,7 +22,7 @@ class CatalogProduct:
     id: str
     name: str
     brand: str | None
-    category: str | None
+    categories: tuple[str, ...] = ()
 
     @property
     def normalized_name(self) -> str:
@@ -53,14 +53,24 @@ def load_catalog(conn: Connection) -> CatalogIndex:
     ).select_from(
         db_upgrade.Product.outerjoin(
             db_upgrade.Brand, db_upgrade.Product.c.BrandId == db_upgrade.Brand.c.Id
-        ).outerjoin(
+        )
+        .outerjoin(
+            db_upgrade.ProductCategory,
+            db_upgrade.Product.c.Id == db_upgrade.ProductCategory.c.ProductId,
+        )
+        .outerjoin(
             db_upgrade.Category,
-            db_upgrade.Product.c.CategoryId == db_upgrade.Category.c.Id,
+            db_upgrade.ProductCategory.c.CategoryId == db_upgrade.Category.c.Id,
         )
     )
+    product_data: dict[str, tuple[str, str | None, list[str]]] = {}
+    for product_id, name, brand, category in conn.execute(query):
+        existing = product_data.setdefault(product_id, (name, brand, []))
+        if category and category not in existing[2]:
+            existing[2].append(category)
     products = [
-        CatalogProduct(id, name, brand, category)
-        for id, name, brand, category in conn.execute(query)
+        CatalogProduct(product_id, name, brand, tuple(categories))
+        for product_id, (name, brand, categories) in product_data.items()
     ]
     logger.info("catalog loaded products=%d", len(products))
     return CatalogIndex(products)
@@ -197,18 +207,30 @@ class FeedImporter:
 
     def _insert_product(self, entry: ProductEntry) -> CatalogProduct:
         brand_id = self._reference_id(db_upgrade.Brand, self.brand_ids, entry.Brand)
-        category_id = self._reference_id(db_upgrade.Category, self.category_ids, entry.Category)
-        product = CatalogProduct(db_upgrade.new_uuid(), entry.Name, entry.Brand, entry.Category)
+        product = CatalogProduct(db_upgrade.new_uuid(), entry.Name, entry.Brand)
         self.conn.execute(
             insert(db_upgrade.Product).values(
                 Id=product.id,
                 Name=product.name,
                 BrandId=brand_id,
-                CategoryId=category_id,
             )
         )
+        self._attach_category(product, entry.Category)
         self.catalog.add(product)
         return product
+
+    def _attach_category(self, product: CatalogProduct, raw_category: str | None) -> None:
+        category_id = self._reference_id(db_upgrade.Category, self.category_ids, raw_category)
+        normalized = normalize(raw_category)
+        if not category_id or not normalized:
+            return
+        self.conn.execute(
+            insert(db_upgrade.ProductCategory)
+            .values(ProductId=product.id, CategoryId=category_id)
+            .prefix_with("OR IGNORE")
+        )
+        if not any(normalize(category) == normalized for category in product.categories):
+            product.categories = (*product.categories, normalized.title())
 
     def _existing_sku_product(self, seller_id: str, external_sku: str) -> str | None:
         return self.conn.execute(
@@ -307,11 +329,13 @@ class FeedImporter:
                 score,
             )
 
+        incoming_category = normalize(entry.Category)
         category_diverges = (
-            product.category
-            and entry.Category
-            and normalize(product.category) != normalize(entry.Category)
+            bool(product.categories)
+            and bool(incoming_category)
+            and not any(normalize(category) == incoming_category for category in product.categories)
         )
+        self._attach_category(product, entry.Category)
         if category_diverges:
             logger.warning(
                 "event=category_divergence record=%d product_id=%s",

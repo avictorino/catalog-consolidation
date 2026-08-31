@@ -6,9 +6,9 @@ Against the currently published sources, with either matcher backend, all of the
 hold (derivation and per-entry outcomes in
 [`data-profile.md#resulting-row-counts`](data-profile.md#resulting-row-counts)):
 
-- **637** `Brand`, **43** `Category`, **975** `Product`, **20** `Seller`,
+- **637** `Brand`, **44** `Category`, **975** `Product`, **20** `Seller`,
   **256** `SellerProduct`.
-- 119 `Product` rows with `BrandId IS NULL`; 34 with `CategoryId IS NULL`.
+- 119 `Product` rows with `BrandId IS NULL`; 34 have no `ProductCategory` membership.
 - Report counters: `new = 0`, `skipped = 0`, `threat = 1`
   (`MegaStore` / `"Security Test Product"`).
 
@@ -39,8 +39,9 @@ Verify:
 - After the refactor the database matches the target schema; `foreign_key_check` passes;
   `alembic_version` reads `0001`; every `Id` / FK is a 36-char `uuid4`; no
   `AUTOINCREMENT` in the schema and `sqlite_sequence` holds no counters.
-- All 975 base products are present (their `Name`, a fresh `uuid4` `Id`, and a `BrandId`
-  / `CategoryId` that may be `NULL`); `Brand` holds 637 rows, `Category` 43; no row lost.
+- All 975 base products are present (their `Name`, a fresh `uuid4` `Id`, and a nullable
+  `BrandId`); `Brand` holds 637 rows, `Category` starts with 43 rows, and every
+  non-null legacy category becomes a `ProductCategory` membership; no row is lost.
 - Conditional: a legacy source is migrated by revision `0001`; a source already at
   `0001` leaves `alembic upgrade head` a no-op; an unrecognized schema aborts before
   any write.
@@ -68,7 +69,7 @@ Verify:
 - An invalid JSON record still aborts the stream safely; a persistence failure after
   several committed items rolls back only that item, later items continue, the partial
   result is published, and the failed record is logged at the end.
-- An invalid `BrandId`, `CategoryId`, `SellerId`, or `ProductId` is rejected by SQLite.
+- An invalid `BrandId`, `ProductCategory.CategoryId`, `SellerId`, or `ProductId` is rejected by SQLite.
   All earlier writes for that item are rolled back, subsequent items still run with
   FK enforcement enabled, and the violation appears in the final failure log.
 - `[]` as the feed is valid and produces the refactored base catalog with no links.
@@ -84,7 +85,8 @@ Verify:
   only conflicting brands → skip and report a brand conflict.
 - PT→EN translation variant within the fuzzy gate → link only.
 - Missing brand on one side → still matches on name.
-- Category difference between entry and product → link, `WARNING` logged.
+- Category difference between entry and product → add a `ProductCategory` membership,
+  link, and log a `WARNING`.
 - A model/capacity difference (`128GB` vs `256GB`) → not matched, new product.
 - A constructed two-candidate case → entry skipped and reported, import continues.
 
@@ -93,7 +95,8 @@ Verify:
 - A brand name new to the database creates exactly one `Brand` row; brand names that
   normalize equally share a row. Same for `Category`.
 - A new product with `Brand = null` is inserted with `BrandId IS NULL`; the migration
-  leaves the 119 brand-less and 34 category-less base rows with `NULL` FKs.
+  leaves the 119 brand-less and 34 category-less base products without a category
+  membership.
 - A seller name new to the database creates exactly one `Seller` row; the same name
   reuses it.
 - The same product offered by two different sellers produces two links, each with its
@@ -126,9 +129,9 @@ Verify:
   that somehow reached persistence would still be stored as an inert string, never
   executed.
 - Referential integrity holds after the refactor; every base `Product` survives with its
-  `Name` (new `uuid4` `Id`, `Brand` → `BrandId`, `Category` → `CategoryId`), and any
-  pre-existing `SellerProduct` rows survive as `(SellerId, ProductId, ExternalSku)` links
-  with the remapped UUID foreign keys.
+  `Name` (new `uuid4` `Id`, `Brand` → `BrandId`, `Category` → `ProductCategory`), and
+  any pre-existing `SellerProduct` rows survive as `(SellerId, ProductId, ExternalSku)`
+  links with the remapped UUID foreign keys.
 
 ### Observability
 
