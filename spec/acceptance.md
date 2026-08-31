@@ -21,10 +21,9 @@ tool must still be correct.
 
 - With the shipped `.env`, a bare `python -m consolidation.cli` resolves to the S3
   sources, `catalog_output.db`, `difflib`, threshold `0.90`.
-- Every option has a key in `.env`; precedence holds: CLI > env var > `.env` > built-in
-  fallback.
-- Removing `.env` entirely still resolves the same values from the built-in fallbacks.
-- A `THRESHOLD` in `.env` or the environment overrides the backend's suggested value.
+- Every option has a key in `.env`; precedence holds: CLI > `.env`.
+- Removing `.env` entirely invalidates a bare run before any work starts.
+- A `THRESHOLD` in `.env` or the CLI overrides the backend's suggested value.
 - `.env` is located relative to the entry point even when the process runs from another
   directory.
 - A non-TLS `http://` source URL produces a `WARNING` and still runs.
@@ -38,17 +37,19 @@ Verify:
 - The base catalog is downloaded in chunks to a temp file, not held whole in memory.
 - A corrupt or non-SQLite download is rejected before any write.
 - After the refactor the database matches the target schema; `foreign_key_check` passes;
-  `user_version = 1`; every `Id` / FK is a 36-char `uuid4`; no `AUTOINCREMENT` /
-  `sqlite_sequence`.
+  `alembic_version` reads `0001`; every `Id` / FK is a 36-char `uuid4`; no
+  `AUTOINCREMENT` in the schema and `sqlite_sequence` holds no counters.
 - All 975 base products are present (their `Name`, a fresh `uuid4` `Id`, and a `BrandId`
   / `CategoryId` that may be `NULL`); `Brand` holds 637 rows, `Category` 43; no row lost.
-- Conditional: a legacy source is migrated; a source already at `user_version = 1` skips
-  the migration; an unrecognized schema aborts before any write.
+- Conditional: a legacy source is migrated by revision `0001`; a source already at
+  `0001` leaves `alembic upgrade head` a no-op; an unrecognized schema aborts before
+  any write.
 - Re-running against the tool's own previous output with the same feed produces
   logically identical tables and reports 0 `new`.
 - The refactor is inside the same transaction as feed processing; a later failure rolls
   back the new tables too.
-- No Alembic migration files exist in the repo.
+- Exactly one Alembic revision exists (`0001`) and it is the head; env.py refuses
+  offline mode and requires an injected connection.
 
 ### Streaming
 

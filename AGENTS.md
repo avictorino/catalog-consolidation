@@ -1,6 +1,11 @@
-# CLAUDE.md
+# AGENTS.md
 
 Working rules for AI assistance on this repository.
+
+## Conventions
+
+- Pull request titles and descriptions are written in English, regardless of the
+  language used in chat. Commit messages and code comments are English too.
 
 ## Scope
 
@@ -13,9 +18,12 @@ Working rules for AI assistance on this repository.
 ## Design constraints
 
 - **DB refactor**: implement exactly as `spec/data-profile.md#refactored-database`
-  specifies — do not restate the schema or the steps elsewhere. SQLAlchemy Core (no
-  ORM, no Alembic); `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`; runs inside the
-  single import transaction; conditional on `PRAGMA user_version`.
+  specifies — do not restate the schema or the steps elsewhere. SQLAlchemy Core for the
+  schema and statements (no ORM); the refactor is a single Alembic revision (`0001`)
+  driven programmatically with an injected connection, so it runs inside the single
+  import transaction. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
+  Alembic's `alembic_version` marker (legacy source migrated, already-migrated source
+  left alone, unrecognized schema aborts).
 - One transaction per import (refactor + feed), never per entry. All feed writes are
   idempotent so a re-run against a previous output is safe.
 - `Brand` / `Category` are reference tables (nullable FK), not junctions.
@@ -47,6 +55,7 @@ Expected against the published sources, for both backends: 637 brands, 43 catego
 ## Out of scope
 
 - Indexed candidate reduction (FTS5 / trigram / spellfix1).
-- SQLAlchemy ORM, Alembic, `Brand`/`Category` `DisplayName`, a persisted product name
-  index, global product identity, processing resume.
+- SQLAlchemy ORM, an Alembic revision chain / autogenerate / offline mode (only the
+  single hand-written `0001` revision), `Brand`/`Category` `DisplayName`, a persisted
+  product name index, global product identity, processing resume.
 - CSV input, local-file input, AI-based review.

@@ -25,6 +25,7 @@ the database.
 | Similarity | `difflib` (stdlib) / `rapidfuzz` | interchangeable `score()` backends |
 | SQL injection screen | `libinjection` (`libinjection-python`) | WAF-grade tokenizer (ModSecurity uses libinjection); wrapper is GPLv3, core is BSD-3, no cp311/cp312 wheel |
 | Database access + schema | **SQLAlchemy Core 2.x** | declarative target schema, parameterized statements, `insert()` for the refactor |
+| Schema refactor | **Alembic 1.14** (single revision `0001`) | one hand-written migration, driven programmatically with an injected connection so it shares the import transaction; `alembic_version` is the legacy/migrated marker |
 | Primary keys | **UUID (`uuid4`) as `TEXT`**, generated in Python | non-enumerable, generated without DB coordination, stable across environments; no `AUTOINCREMENT` anywhere |
 | Config | `python-dotenv` | every CLI option has a default in `.env` |
 
@@ -32,10 +33,14 @@ the database.
 permissive-only dependency tree is required, the screening module is the single swap
 point — its `Similarity`-style seam takes any `is_sqli(str) -> bool`.
 
-**Not used:** the SQLAlchemy ORM (no object graph here — bulk reads and inserts only)
-and Alembic (there is no chain of versioned schema revisions to replay). The refactor is
-a single [conditional migration](spec/data-profile.md#conditional-migration) guarded by
-`PRAGMA user_version`, expressed with Core constructs.
+**Not used:** the SQLAlchemy ORM (no object graph here — bulk reads and inserts only),
+and Alembic's revision-chain / autogenerate / offline (`--sql`) machinery. The refactor
+is a single [conditional migration](spec/data-profile.md#conditional-migration): one
+hand-written Alembic revision (`0001`), run programmatically from
+`consolidation.pipeline` with the live connection injected via
+`config.attributes["connection"]` so it executes inside the single import transaction.
+Alembic's `alembic_version` table replaces a `PRAGMA user_version` guard as the
+legacy/already-migrated marker.
 
 ## Data
 
@@ -57,9 +62,10 @@ Expected result: [`spec/acceptance.md`](spec/acceptance.md).
 The given model is compromised, so on every run — before any feed processing, inside
 the single import transaction — both given tables are dropped and recreated and three
 reference tables (`Brand`, `Category`, `Seller`) are added, all with `uuid4` `TEXT`
-primary keys. It is a `PRAGMA user_version`-guarded conditional migration (a legacy
-source is migrated; an already-migrated one is left alone), so the tool can also run
-incrementally against its own output.
+primary keys. It is a conditional migration keyed on Alembic's `alembic_version` marker
+(a legacy source is migrated by revision `0001`; an already-migrated one leaves
+`alembic upgrade head` a no-op), so the tool can also run incrementally against its own
+output.
 
 ### Why the given model is wrong
 
@@ -203,11 +209,12 @@ instant). Indexed candidate reduction is out of scope.
 
 1. Resolve and validate configuration (CLI plus `.env` next to the entry point).
 2. Download `catalog.db` in chunks to a temp file in the output directory (fresh every run).
-3. Verify the SQLite header; read `PRAGMA user_version` and check the table shape to
-   classify the source as legacy, already-migrated, or unrecognized (abort on the last).
-4. Open a SQLAlchemy engine on the temp file, begin **one** transaction; run the
-   [database refactor](spec/data-profile.md#refactored-database) — full migration for a
-   legacy source, nothing for an already-migrated one.
+3. Verify the SQLite header; check the table shape and the presence of `alembic_version`
+   to classify the source as legacy, already-migrated, or unrecognized (abort on the last).
+4. Open a SQLAlchemy engine on the temp file, begin **one** transaction; run
+   `alembic upgrade head` with that connection injected — revision `0001` performs the
+   full [database refactor](spec/data-profile.md#refactored-database) for a legacy
+   source and is a no-op for an already-migrated one.
 5. Stream `ProductEntry.json` with `requests` + `ijson`; validate each object with
    Pydantic; screen each string field with `libinjection`.
 6. For each surviving entry: resolve the product; when inserting a new product, mint a
@@ -222,7 +229,8 @@ partial resume.
 
 ## Out of scope for the first iteration
 
-Indexed candidate reduction (FTS5 / trigram / spellfix1), the SQLAlchemy ORM, Alembic
-versioned migrations, `Brand.DisplayName` / `Category.DisplayName`, `BLOB(16)` / UUIDv7
-key encoding, a persisted product name index, global product identity, labeled-data
-evaluation, processing resume.
+Indexed candidate reduction (FTS5 / trigram / spellfix1), the SQLAlchemy ORM, an Alembic
+revision chain / autogenerate / offline mode (only the single hand-written `0001`),
+`Brand.DisplayName` / `Category.DisplayName`, `BLOB(16)` / UUIDv7 key encoding, a
+persisted product name index, global product identity, labeled-data evaluation,
+processing resume.
