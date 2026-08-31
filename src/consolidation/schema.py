@@ -1,18 +1,19 @@
-"""Schema upgrade: target schema, source classification, and the refactor steps.
+"""Persistence layer — the database schema and its one-way refactor.
 
-Everything that reshapes the database lives here — the declarative target schema
-(SQLAlchemy Core ``Table`` metadata), the introspection that classifies a downloaded
-database, and the data-migration helpers the Alembic revision calls to build the new
-model, copy data between tables, and drop the denormalized columns.
+Everything that reshapes the database lives here: the declarative target schema
+(SQLAlchemy Core ``Table`` metadata), the introspection that classifies a
+downloaded database, and the data-migration helpers the Alembic revision calls to
+build the new model, copy data between tables, and drop the denormalized columns.
 
 The full target schema and the migration steps are specified in
 ``spec/data-profile.md#refactored-database``.
+
+Depends on: :mod:`consolidation.domain` (normalization), SQLAlchemy Core.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Literal
 
 from sqlalchemy import (
@@ -28,7 +29,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Connection
 
-from consolidation.util import normalize
+from consolidation.domain import new_uuid, normalize
 
 logger = logging.getLogger("consolidation")
 
@@ -89,9 +90,8 @@ SellerProduct = Table(
 )
 
 
-def new_uuid() -> str:
-    """A fresh ``uuid4`` as a 36-char string, minted in Python (no DB coordination)."""
-    return str(uuid.uuid4())
+# ``new_uuid`` is re-exported from :mod:`consolidation.domain` for callers that
+# reach for it as ``schema.new_uuid`` alongside the table metadata.
 
 
 # --------------------------------------------------------------------------- #

@@ -74,6 +74,8 @@ Download, schema refactor, and feed import are implemented. The feed is streamed
 JSON, validated one record at a time, screened for injection, and resolved against the
 catalog before publication.
 
+- [`docs/arquitetura.md`](docs/arquitetura.md) — DDD layering: domain, services,
+  repositories, use cases, infrastructure (educational overview).
 - [`prd.md`](prd.md) — design rationale and decisions (why).
 - [`spec/data-profile.md`](spec/data-profile.md) — input-data profile, **the refactored schema and migration** (source of truth), and the expected result.
 - [`spec/contract.md`](spec/contract.md) — IO contract, CLI, validation, logging, and the normative refactor / matcher rules.

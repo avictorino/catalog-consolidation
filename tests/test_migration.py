@@ -9,8 +9,8 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.engine import Connection
 
-from consolidation import db_upgrade, pipeline
-from consolidation.feed import ProductEntry
+from consolidation import schema, usecase
+from consolidation.infrastructure import ProductEntry
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -151,8 +151,8 @@ def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
         shutil.copy(legacy_db, tmp)
         return tmp
 
-    monkeypatch.setattr(pipeline, "download_to", fake_download_to)
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(()))
+    monkeypatch.setattr(usecase, "download_to", fake_download_to)
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(()))
     return legacy_db
 
 
@@ -168,7 +168,7 @@ def _config(output: Path) -> dict[str, object]:
 
 def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Path) -> None:
     output = tmp_path / "out" / "catalog_output.db"
-    assert pipeline.run(**_config(output)) == 0
+    assert usecase.run(**_config(output)) == 0
     assert output.exists()
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _rows(output, "PRAGMA foreign_key_check") == []
@@ -207,10 +207,10 @@ def test_pipeline_imports_feed(
             }
         ),
     ]
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
     output = tmp_path / "catalog_output.db"
 
-    assert pipeline.run(**_config(output)) == 0
+    assert usecase.run(**_config(output)) == 0
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _count(output, "Seller") == 1
     assert _count(output, "SellerProduct") == 1
@@ -251,19 +251,19 @@ def test_pipeline_isolates_item_failure_and_logs_it(
             }
         ),
     ]
-    original_process = pipeline.FeedImporter.process
+    original_process = usecase.ConsolidateEntryUseCase.process
 
     def fail_one_item(self, entry, record_index, report) -> None:
         if record_index == 1:
             raise RuntimeError("injected item failure")
         original_process(self, entry, record_index, report)
 
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
-    monkeypatch.setattr(pipeline.FeedImporter, "process", fail_one_item)
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", fail_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.ERROR, logger="consolidation"):
-        result = pipeline.run(**_config(output))
+        result = usecase.run(**_config(output))
 
     assert result == 1
     assert output.exists()
@@ -321,34 +321,34 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             Category="New Category",
         ),
     ]
-    original_process = pipeline.FeedImporter.process
+    original_process = usecase.ConsolidateEntryUseCase.process
     enforcement = []
 
     def violate_one_item(self, entry, record_index, report) -> None:
         enforcement.append(self.conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
         original_process(self, entry, record_index, report)
         if record_index == 1:
-            table = db_upgrade.metadata.tables[table_name]
+            table = schema.metadata.tables[table_name]
             if table_name == "Product":
                 where = table.c.Name == entry.Name
             elif table_name == "ProductCategory":
                 product_id = self.conn.scalar(
-                    db_upgrade.Product.select()
-                    .with_only_columns(db_upgrade.Product.c.Id)
-                    .where(db_upgrade.Product.c.Name == entry.Name)
+                    schema.Product.select()
+                    .with_only_columns(schema.Product.c.Id)
+                    .where(schema.Product.c.Name == entry.Name)
                 )
                 where = table.c.ProductId == product_id
             else:
                 where = table.c.ExternalSku == entry.Id
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
-            self.conn.execute(update(table).where(where).values({column: db_upgrade.new_uuid()}))
+            self.conn.execute(update(table).where(where).values({column: schema.new_uuid()}))
 
-    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
-    monkeypatch.setattr(pipeline.FeedImporter, "process", violate_one_item)
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", violate_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.INFO, logger="consolidation"):
-        result = pipeline.run(**_config(output))
+        result = usecase.run(**_config(output))
 
     assert result == 1
     assert enforcement == [1, 1, 1]
@@ -396,9 +396,9 @@ def test_pipeline_aborts_before_feed_if_foreign_keys_cannot_be_enabled(
         return iter(())
 
     monkeypatch.setattr(Connection, "exec_driver_sql", ignore_enabling)
-    monkeypatch.setattr(pipeline, "iter_feed", unexpected_feed)
+    monkeypatch.setattr(usecase, "iter_feed", unexpected_feed)
 
-    assert pipeline.run(**_config(output)) == 1
+    assert usecase.run(**_config(output)) == 1
     assert not feed_requested
     assert "foreign key enforcement could not be enabled" in caplog.text
     assert output.read_bytes() == b"previous output"
@@ -414,8 +414,8 @@ def test_pipeline_rollback_preserves_previous_output(
     def boom(conn) -> None:
         raise RuntimeError("injected failure after pending inserts")
 
-    monkeypatch.setattr(db_upgrade, "foreign_key_check", boom)
-    assert pipeline.run(**_config(output)) == 1
+    monkeypatch.setattr(schema, "foreign_key_check", boom)
+    assert usecase.run(**_config(output)) == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -431,7 +431,7 @@ def test_pipeline_aborts_on_unrecognized_schema(
         shutil.copy(empty, tmp)
         return tmp
 
-    monkeypatch.setattr(pipeline, "download_to", fake_download_to)
+    monkeypatch.setattr(usecase, "download_to", fake_download_to)
     output = tmp_path / "out.db"
-    assert pipeline.run(**_config(output)) == 1
+    assert usecase.run(**_config(output)) == 1
     assert not output.exists()

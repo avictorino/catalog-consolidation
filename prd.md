@@ -37,7 +37,7 @@ point — its `Similarity`-style seam takes any `is_sqli(str) -> bool`.
 and Alembic's revision-chain / autogenerate / offline (`--sql`) machinery. The refactor
 is a single [conditional migration](spec/data-profile.md#conditional-migration): one
 hand-written Alembic revision (`0001`), run programmatically from
-`consolidation.pipeline` with the live connection injected via
+`consolidation.usecase` with the live connection injected via
 `config.attributes["connection"]` so it executes inside the setup transaction.
 Alembic's `alembic_version` table replaces a `PRAGMA user_version` guard as the
 legacy/already-migrated marker.
@@ -171,14 +171,15 @@ difference is logged at `WARNING`.
 | Same seller offers the same product twice | `GardenStore` Câmera/Camera, plus 11 more entries | one link; the first entry's SKU is kept, the rest log `duplicate_listing` |
 | Null `Brand` / `Category` | brand: 3 feed / 119 catalog rows; category: 34 catalog rows | `BrandId` is `NULL` or `ProductCategory` has no row; absent brand does not block a name match |
 
-## Matcher layer (parameter injection)
+## Matcher layer (dependency injection)
 
-One injection point: the similarity backend, constructed at the CLI edge and passed as
-a keyword argument. No DI container, no framework.
+One injection point: the similarity backend. The **port** lives in the domain-services
+layer, the **adapters** in infrastructure, and the **composition root** (`cli` ->
+`usecase.run`) picks one by name and injects the instance down the call chain
+(`ConsolidateEntryUseCase` -> `ProductIdentityResolver`). No DI container, no framework.
 
 ```python
-from typing import Protocol
-
+# consolidation/services.py — the port (a domain-owned contract)
 class Similarity(Protocol):
     name: str
     suggested_threshold: float
@@ -186,7 +187,7 @@ class Similarity(Protocol):
 ```
 
 - `DifflibSimilarity` — `SequenceMatcher(None, a, b, autojunk=False).ratio()`, stdlib.
-- `RapidFuzzSimilarity` — `fuzz.ratio(a, b) / 100.0`, external.
+- `RapidFuzzSimilarity` — `fuzz.ratio(a, b) / 100.0`, external (imported lazily).
 - `fuzz.WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed — they hide
   extra terms that matter for identity (capacity, model).
 - `fuzz.ratio` and `difflib.ratio` are both `2M/T`; on this data both give `0.909`
@@ -194,22 +195,23 @@ class Similarity(Protocol):
   general, hence each backend carries its own `suggested_threshold`; a `THRESHOLD` in
   `.env` or the environment overrides it.
 
-Factory with lazy imports (the `difflib` path never imports `rapidfuzz`):
-
 ```python
+# consolidation/infrastructure.py — the factory (adapters + lazy import)
 def build_similarity(name: str) -> Similarity:
     if name == "difflib":
-        from .difflib_impl import DifflibSimilarity
         return DifflibSimilarity()
     if name == "rapidfuzz":
-        from .rapidfuzz_impl import RapidFuzzSimilarity
-        return RapidFuzzSimilarity()
-    raise SystemExit(f"unknown matcher: {name!r} (options: difflib, rapidfuzz)")
+        return RapidFuzzSimilarity()          # `from rapidfuzz import fuzz` happens inside .score
+    raise ValueError(f"unknown matcher: {name!r} (options: difflib, rapidfuzz)")
+
+# consolidation/usecase.py — injection
+similarity = build_similarity(matcher)                     # composition root chooses
+use_case = ConsolidateEntryUseCase(conn, catalog, similarity, threshold)   # injected here
+#   -> ProductIdentityResolver(similarity, threshold)                      # ...and here
 ```
 
-```python
-def consolidate(entries, engine, *, similarity: Similarity, threshold: float) -> Report: ...
-```
+Tests inject a backend directly (`ConsolidateEntryUseCase(conn, catalog, DifflibSimilarity(), 0.90)`),
+never touching the factory — that is the payoff of the seam.
 
 Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan (975 rows;
 instant). Indexed candidate reduction is out of scope.

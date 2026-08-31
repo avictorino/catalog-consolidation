@@ -1,9 +1,13 @@
-"""Command-line entry point: ``python -m consolidation.cli``.
+"""Interface layer — the command-line entry point and composition root.
 
-Configuration is deliberately small: every option comes from ``.env`` (looked up next
-to this package, so it is found from any working directory), and a CLI flag overrides
-its ``.env`` value. If an option is set in neither place the run is invalid — an error
-is logged and the process exits non-zero. There are no built-in fallbacks.
+``python -m consolidation.cli`` resolves configuration and calls the
+:func:`consolidation.usecase.run` use case. Configuration is deliberately small:
+every option comes from ``.env`` (looked up next to this package, so it is found
+from any working directory), and a CLI flag overrides its ``.env`` value. If an
+option is set in neither place the run is invalid — an error is logged and the
+process exits non-zero. There are no built-in fallbacks.
+
+Depends on: :mod:`consolidation.usecase`.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from urllib.parse import urlparse
 
 from dotenv import dotenv_values
 
-from consolidation import pipeline
+from consolidation import usecase
 
 logger = logging.getLogger("consolidation")
 
@@ -110,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         config["matcher"],
         config["threshold"],
     )
-    return pipeline.run(**config)
+    return usecase.run(**config)
 
 
 if __name__ == "__main__":

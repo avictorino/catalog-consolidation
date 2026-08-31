@@ -18,7 +18,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-from consolidation import db_upgrade
+from consolidation import schema
 
 revision: str = "0001"
 down_revision: str | None = None
@@ -29,14 +29,14 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     conn = op.get_bind()
 
-    db_upgrade.create_staging_tables(conn)
-    brand_map = db_upgrade.extract_brands(conn)
-    category_map = db_upgrade.extract_categories(conn)
-    db_upgrade.extract_product_sellers(conn)
-    product_id_map = db_upgrade.rebuild_product(conn, brand_map, category_map)
-    db_upgrade.rebuild_seller_product(conn, product_id_map)
-    db_upgrade.swap_tables(conn)
-    db_upgrade.foreign_key_check(conn)
+    schema.create_staging_tables(conn)
+    brand_map = schema.extract_brands(conn)
+    category_map = schema.extract_categories(conn)
+    schema.extract_product_sellers(conn)
+    product_id_map = schema.rebuild_product(conn, brand_map, category_map)
+    schema.rebuild_seller_product(conn, product_id_map)
+    schema.swap_tables(conn)
+    schema.foreign_key_check(conn)
 
 
 def downgrade() -> None:

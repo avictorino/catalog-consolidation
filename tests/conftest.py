@@ -9,7 +9,7 @@ import pytest
 from alembic import command
 from sqlalchemy import create_engine
 
-from consolidation.pipeline import _alembic_config
+from consolidation.infrastructure import alembic_config
 
 # A legacy catalog exercising every migration concern at tiny scale:
 # - two brands that merge on normalization (BLACK+DECKER / Black+DECKER)
@@ -49,7 +49,7 @@ def apply_refactor(db_path: Path) -> None:
         with engine.connect() as conn:
             trans = conn.begin()
             try:
-                command.upgrade(_alembic_config(conn), "head")
+                command.upgrade(alembic_config(conn), "head")
                 trans.commit()
             except Exception:
                 trans.rollback()
