@@ -7,7 +7,8 @@ Against the currently published sources, with either matcher backend:
 | Metric | Value | Derivation |
 | --- | --- | --- |
 | `Product` rows after import | **976** | 975 base + 1 new (`Security Test Product`) |
-| `SellerProduct` rows after import | **268** | 269 feed entries − 1 repeated `(SellerName, Id)` pair |
+| `Seller` rows after import | **20** | distinct `SellerName` values in the feed |
+| `SellerProduct` rows after import | **257** | distinct `(SellerId, ProductId)` pairs; 12 feed entries are a seller re-offering a product it already has (different feed `Id`, name variant) |
 | New products | 1 | only `Security Test Product`; PT→EN name variants match existing products |
 | Skipped entries | 0 | no ambiguous multi-candidate or brand-conflict case in the current data |
 
@@ -24,11 +25,16 @@ The tool must still be correct; only this table becomes stale.
   directory.
 - A non-TLS `http://` source URL produces a `WARNING` and still runs.
 
-### Download and rebuild
+### Download and refactor
 
 - Every run downloads the base catalog again; the previous output is never read as input.
 - The base catalog is downloaded in chunks to a temp file, not held whole in memory.
 - A corrupt or non-SQLite download is rejected before any write.
+- After the refactor the database has a `Seller (Id, Name UNIQUE)` table and a
+  `SellerProduct (SellerId, ProductId)` link table with a composite primary key;
+  `Product` is byte-for-byte unchanged; `foreign_key_check` passes.
+- The refactor runs inside the same transaction as feed processing; a later failure
+  rolls back the new tables too.
 
 ### Streaming
 
@@ -54,13 +60,16 @@ The tool must still be correct; only this table becomes stale.
 - A model/capacity difference (`128GB` vs `256GB`) → not matched, new product.
 - A constructed two-candidate case → entry skipped and reported, import continues.
 
-### Ids and links
+### Sellers and links
 
-- Text ids are stored as `TEXT` without coercion.
-- The same `Id` string under two different sellers produces two independent links.
-- The same `(SellerName, Id)` pair appearing twice in the feed produces one link.
-- No silent re-association: a pair mapping to a different product than before is skipped
-  and reported.
+- A seller name new to the database creates exactly one `Seller` row; the same name
+  seen again reuses it.
+- The same product offered by two different sellers produces two links.
+- A seller offering the same product via several feed entries (name variants, distinct
+  feed `Id`s) produces exactly one `(SellerId, ProductId)` link.
+- Re-running the whole import produces the same `SellerProduct` contents (no duplicate
+  links).
+- The feed `Id` is not written to any table.
 
 ### Matcher backends
 
@@ -73,7 +82,8 @@ The tool must still be correct; only this table becomes stale.
 
 - SQL-like text in any field (`"TestBrand'; SELECT 1; --"`) is treated purely as data;
   the row is inserted as an ordinary new product.
-- Referential integrity holds; the schema adaptation loses no existing data.
+- Referential integrity holds after the refactor; `Product` data is unchanged and any
+  pre-existing `SellerProduct` rows survive the rebuild as `(SellerId, ProductId)` links.
 
 ### Observability
 

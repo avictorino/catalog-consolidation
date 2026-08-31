@@ -27,9 +27,12 @@ CREATE TABLE SellerProduct (
   sample. Names are **unique after normalization** — zero collisions — so an exact
   normalized-name lookup returns at most one product.
 - `SellerProduct`: **0 rows**. No index, no uniqueness constraint. Because it is empty,
-  there are no pre-existing links to preserve.
-- `SellerProductId` is declared `INTEGER`, but the feed's `Id` values are UUID strings.
-  This is the schema change the challenge hints at: the column must become `TEXT`.
+  there are no pre-existing links to migrate.
+- The model is compromised: `SellerName` is denormalized, `SellerProductId` is declared
+  `INTEGER` while the feed's `Id` values are UUID strings, the surrogate `Id` is
+  pointless on a link table, and there is no uniqueness constraint. It is rebuilt into a
+  `Seller (Id, Name)` table plus a `SellerProduct (SellerId, ProductId)` link with a
+  composite primary key — see [`contract.md`](contract.md#5-schema-refactor-on-the-downloaded-copy-before-feed-processing).
 
 ## Seller feed (`ProductEntry.json`)
 
@@ -45,8 +48,15 @@ CREATE TABLE SellerProduct (
   - **14 `Id` strings are reused** across different products / sellers — so `Id` alone
     cannot identify a product; it is at best a seller-scoped SKU.
 - **1 `(SellerName, Id)` pair is repeated**: `GardenStore` with the same `Id`, once as
-  `"Câmera Canon EOS R6"` and once as `"Camera Canon EOS R6"`. This is why 269 entries
-  become 268 links.
+  `"Câmera Canon EOS R6"` and once as `"Camera Canon EOS R6"`.
+- Distinct seller names: **20**.
+
+### Resulting link count
+
+The refactored `SellerProduct` is keyed by `(SellerId, ProductId)`, so it records each
+seller-product relationship once. The 269 feed entries collapse to **257 links**: 12
+entries are a seller re-offering a product it already listed under a different feed
+`Id` / name variant (`GardenStore` accounts for 3 of them, 9 other sellers 1 each).
 
 ## Match outcomes with normalization only
 
@@ -81,22 +91,3 @@ The 3 without an exact match:
 - **SQL injection probe**: one entry has `Brand = "TestBrand'; SELECT 1; --"`,
   `Name = "Security Test Product"`. It is a legitimate new product; the point is that
   parameterized SQL must be used everywhere.
-
-## FTS5 probe (why it is not the shipped matcher)
-
-Tested in an in-memory FTS5 table over the catalog names:
-
-| Query | Result |
-| --- | --- |
-| `Running Shoes  Nike Air Zoom` | finds the single-space name |
-| `Câmera Canon EOS R6` | finds `Camera Canon EOS R6` |
-| phrase `Roteador WiFi 6 TP-Link` | does **not** find `Router WiFi 6 TP-Link` |
-| terms `WiFi`, `6`, `TP-Link` | finds the router |
-| phrase `iPhone 15 Pro` | also matches `iPhone 15 Pro Max` |
-
-So the top FTS5 hit cannot be accepted blindly, and `bm25()` is not comparable to the
-`0.90` similarity cutoff. FTS5 belongs to candidate retrieval, not scoring, and is left
-as documented future work.
-
-`spellfix1` (`editdist3`) is not available in the local SQLite build; FTS5 and the
-trigram tokenizer are.

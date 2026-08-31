@@ -60,8 +60,8 @@ Digits and decimal separators inside numbers are preserved (step 3 keeps `12.9` 
 
 1. **Exact**: look up the normalized feed name in the normalized-name index of the
    catalog. Catalog names are unique after normalization, so this yields 0 or 1.
-2. **Fuzzy** (only if stage 1 misses): retrieve candidates from the `CandidateSource`,
-   score each with the selected `Similarity`, and keep those that pass the gate:
+2. **Fuzzy** (only if stage 1 misses): scan the catalog, score each product with the
+   selected `Similarity`, and keep those that pass the gate:
    - both brands, after normalization, are equal — when both are present;
    - same number of whitespace-separated tokens;
    - the multiset of tokens that contain a digit is equal;
@@ -71,32 +71,55 @@ Digits and decimal separators inside numbers are preserved (step 3 keeps `12.9` 
 
 | Situation | Action |
 | --- | --- |
-| Exactly one product (exact or one eligible fuzzy candidate) | insert only the `SellerProduct` link |
+| Exactly one product (exact match or one eligible fuzzy candidate) | `get_or_create` the seller in `Seller`, then `INSERT OR IGNORE` the `(SellerId, ProductId)` link |
 | No product and no eligible candidate | insert a new `Product` (fields from the feed entry), then the link |
-| The link already exists for this identity | no change |
+| The `(SellerId, ProductId)` link already exists | no change (absorbed by the composite primary key) |
 | Two or more eligible candidates, or a brand conflict on an otherwise-matching name | skip the entry, record it in the report, continue |
 
 - Attributes of existing products are never enriched or overwritten.
 - `Category` never affects identity. A category difference between a linked entry and
   its product is logged at `WARNING` and otherwise ignored.
+- The feed `Id` is not persisted. A seller submitting the same product under several
+  feed `Id` values (name variants) produces a single link.
 
 ## 4. Persistence
 
-- One transaction per import. **Not** one transaction per entry.
+- One transaction per import — covering the schema refactor and all feed processing.
+  **Not** one transaction per entry.
 - All statements that touch external data use parameterized SQL.
-- `SellerProduct` uniqueness: `(SellerName, SellerProductId)`. A second entry for the
-  same pair is a no-op; a pair that would map to a different product is a conflict and
-  is skipped and reported.
+- `SellerProduct` identity is its composite primary key `(SellerId, ProductId)`.
+  Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
+- `Seller` rows are created on demand, keyed by `Name` (which is `UNIQUE`).
 - On any failure (network, JSON, validation, database), the transaction is rolled back,
   the temp database is discarded, and the previous output file is left untouched.
 - A failure during the final atomic replacement also preserves the previous output.
 
-## 5. Schema changes (on the downloaded copy)
+## 5. Schema refactor (on the downloaded copy, before feed processing)
 
-- Rebuild `SellerProduct` so that `SellerProductId` has type `TEXT NOT NULL`.
-- Add `UNIQUE(SellerName, SellerProductId)`.
-- Keep the `ProductId` foreign key to `Product(Id)`; enable `PRAGMA foreign_keys = ON`.
+The given `SellerProduct` model is compromised (denormalized `SellerName`, mistyped
+`SellerProductId`, pointless surrogate key, no uniqueness). It is replaced:
+
+```sql
+CREATE TABLE Seller (
+    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    Name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE SellerProduct (
+    SellerId  INTEGER NOT NULL REFERENCES Seller (Id),
+    ProductId INTEGER NOT NULL REFERENCES Product (Id),
+    PRIMARY KEY (SellerId, ProductId)
+);
+```
+
 - `Product` is not altered.
+- Migration is a rebuild: create `Seller`, back-fill it from any existing
+  `SellerProduct.SellerName` values, recreate `SellerProduct` as the link table, copy
+  rows through the seller join, drop the old table. The base table is empty, so this is
+  a no-op copy, but it is written to work with data.
+- `SellerProductId` (the seller's SKU) is intentionally dropped. Rationale and accepted
+  risk: [`prd.md`](../prd.md#accepted-risk).
+- `PRAGMA foreign_keys = ON` outside the rebuild; `PRAGMA foreign_key_check` after it.
 - WAL is not used; the published output is a self-contained database written after the
   connection is closed.
 
@@ -107,16 +130,14 @@ class Similarity(Protocol):
     name: str
     suggested_threshold: float
     def score(self, a: str, b: str) -> float: ...   # inputs already normalized; returns [0, 1]
-
-class CandidateSource(Protocol):
-    def candidates(self, normalized_name: str) -> Iterable[ProductRow]: ...
 ```
 
 - Both `Similarity` implementations must satisfy the same contract and pass the same
   test suite.
 - The backend is chosen in the CLI and injected into `consolidate(...)` as a keyword
-  argument. The default `CandidateSource` is a full table scan.
+  argument.
 - `rapidfuzz` is imported lazily; running with `--matcher difflib` must not require it.
+- Candidate retrieval for the fuzzy stage is a plain full scan of `Product`.
 
 ## 7. Exit codes
 

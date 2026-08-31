@@ -12,7 +12,10 @@ Working rules for AI assistance on this repository.
 
 ## Design constraints
 
-- One transaction per import, never per entry.
+- Refactor the DB on every run, right after download: extract a `Seller (Id, Name)`
+  table and rebuild `SellerProduct` as `(SellerId, ProductId)` with a composite primary
+  key. `Product` is untouched. The feed `Id` / seller SKU is not stored.
+- One transaction per import (refactor + feed), never per entry.
 - Stream the feed: no `response.json()`, `response.content`, `list(iterator)`, or a
   local copy of the JSON.
 - Validate feed objects one at a time with Pydantic v2.
@@ -33,10 +36,12 @@ python -m consolidation.cli --matcher difflib
 python -m consolidation.cli --matcher rapidfuzz
 ```
 
-Expected against the published sources: 976 products, 268 links, for both backends.
+Expected against the published sources: 976 products, 20 sellers, 257 links, for both
+backends.
 
 ## Out of scope
 
-- FTS5 candidate source (documented as future work only).
-- Persisted normalized columns, global product identity, processing resume.
+- Indexed candidate reduction (FTS5 / trigram / spellfix1).
+- Persisted normalized columns, storing the seller SKU, global product identity,
+  processing resume.
 - CSV input, local-file input, an ORM, AI-based review.
