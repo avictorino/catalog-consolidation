@@ -43,6 +43,7 @@ ignore = []
 minversion = "9.0"
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
