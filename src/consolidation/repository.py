@@ -165,6 +165,25 @@ class SellerListingRepository:
         return bool(result.rowcount)
 
 
+class CatalogRepositories:
+    """Every database access for one run, instantiated against a single connection.
+
+    Injected into the use cases so they never wire repositories themselves — the
+    composition root builds this bundle and hands it over ready to use.
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self.conn = conn
+        self.brands = BrandRepository(conn)
+        self.categories = CategoryRepository(conn)
+        self.sellers = SellerRepository(conn)
+        self.products = ProductRepository(conn)
+        self.listings = SellerListingRepository(conn)
+
+    def load_catalog(self) -> Catalog:
+        return self.products.load_catalog()
+
+
 def load_catalog(conn: Connection) -> Catalog:
     """Convenience wrapper: read the catalog through :class:`ProductRepository`."""
     return ProductRepository(conn).load_catalog()

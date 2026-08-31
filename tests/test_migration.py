@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.engine import Connection
 
-from consolidation import schema, usecase
+from consolidation import infrastructure, schema, usecase
+from consolidation.domain import new_uuid
 from consolidation.infrastructure import DifflibSimilarity, ProductEntry
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
@@ -325,14 +326,14 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
     enforcement = []
 
     def violate_one_item(self, entry, record_index, report) -> None:
-        enforcement.append(self.conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
+        enforcement.append(self.repositories.conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
         original_process(self, entry, record_index, report)
         if record_index == 1:
             table = schema.metadata.tables[table_name]
             if table_name == "Product":
                 where = table.c.Name == entry.Name
             elif table_name == "ProductCategory":
-                product_id = self.conn.scalar(
+                product_id = self.repositories.conn.scalar(
                     schema.Product.select()
                     .with_only_columns(schema.Product.c.Id)
                     .where(schema.Product.c.Name == entry.Name)
@@ -341,7 +342,7 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             else:
                 where = table.c.ExternalSku == entry.Id
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
-            self.conn.execute(update(table).where(where).values({column: schema.new_uuid()}))
+            self.repositories.conn.execute(update(table).where(where).values({column: new_uuid()}))
 
     monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
     monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", violate_one_item)
@@ -414,7 +415,7 @@ def test_pipeline_rollback_preserves_previous_output(
     def boom(conn) -> None:
         raise RuntimeError("injected failure after pending inserts")
 
-    monkeypatch.setattr(schema, "foreign_key_check", boom)
+    monkeypatch.setattr(infrastructure, "foreign_key_check", boom)
     assert usecase.ConsolidateCatalogUseCase(**_config(output)).execute() == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []

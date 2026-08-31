@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, func, select
 from consolidation import schema
 from consolidation.domain import Catalog, Product
 from consolidation.infrastructure import DifflibSimilarity, ProductEntry, RapidFuzzSimilarity
-from consolidation.repository import load_catalog
+from consolidation.repository import CatalogRepositories
 from consolidation.services import Similarity, resolve_product
 from consolidation.usecase import ConsolidateEntryUseCase, Report
 
@@ -135,7 +135,8 @@ def test_new_product_is_reused_for_reordered_listing(
     engine = create_engine(f"sqlite:///{migrated_db}")
     try:
         with engine.connect() as conn:
-            importer = ConsolidateEntryUseCase(conn, load_catalog(conn), similarity, 1.0)
+            repos = CatalogRepositories(conn)
+            importer = ConsolidateEntryUseCase(repos.load_catalog(), repos, similarity, 1.0)
             conn.commit()
             report = Report()
             for index, entry in enumerate(entries):
@@ -210,8 +211,10 @@ def test_importer_persists_links_idempotently(migrated_db: Path, caplog) -> None
     try:
         with engine.connect() as conn:
             trans = conn.begin()
-            catalog = load_catalog(conn)
-            importer = ConsolidateEntryUseCase(conn, catalog, DifflibSimilarity(), 0.90)
+            repos = CatalogRepositories(conn)
+            importer = ConsolidateEntryUseCase(
+                repos.load_catalog(), repos, DifflibSimilarity(), 0.90
+            )
             report = Report()
             importer.process(entry, 0, report)
             importer.process(entry.model_copy(update={"Id": "sku-2"}), 1, report)
@@ -249,8 +252,10 @@ def test_same_sku_cannot_be_reassociated(migrated_db: Path) -> None:
     try:
         with engine.connect() as conn:
             trans = conn.begin()
-            catalog = load_catalog(conn)
-            importer = ConsolidateEntryUseCase(conn, catalog, DifflibSimilarity(), 0.90)
+            repos = CatalogRepositories(conn)
+            importer = ConsolidateEntryUseCase(
+                repos.load_catalog(), repos, DifflibSimilarity(), 0.90
+            )
             report = Report()
             importer.process(
                 ProductEntry.model_validate(

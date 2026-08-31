@@ -4,19 +4,22 @@ Two use cases:
 
 * :class:`ConsolidateEntryUseCase` — apply one validated seller submission
   (screen, resolve identity, create-or-link, record the outcome). Pure policy; all
-  persistence goes through repositories.
+  persistence goes through the injected repository bundle.
 * :class:`ConsolidateCatalogUseCase` — the end-to-end run: download, migrate,
   stream the feed, drive the per-entry use case inside one transaction each,
   publish atomically.
 
+Both collaborators the run needs — the ``Similarity`` backend and the
+``CatalogRepositories`` factory — are injected, so the use cases never build them.
+
 Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
-:mod:`consolidation.repository`, :mod:`consolidation.schema`,
-:mod:`consolidation.infrastructure`.
+:mod:`consolidation.repository`, :mod:`consolidation.infrastructure`.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,27 +27,22 @@ from alembic import command
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Connection
 
-from consolidation import schema
-from consolidation.domain import Product, Submission, new_uuid, normalize
+from consolidation.domain import Catalog, Product, Submission, new_uuid, normalize
 from consolidation.infrastructure import (
     FeedValidationError,
     alembic_config,
+    classify_source,
     download_to,
     iter_feed,
     screen_entry,
     verify_sqlite_header,
 )
-from consolidation.repository import (
-    BrandRepository,
-    CategoryRepository,
-    ProductRepository,
-    SellerListingRepository,
-    SellerRepository,
-    load_catalog,
-)
+from consolidation.repository import CatalogRepositories
 from consolidation.services import ProductIdentityResolver, Similarity
 
 logger = logging.getLogger("consolidation")
+
+RepositoriesFactory = Callable[[Connection], CatalogRepositories]
 
 
 @dataclass
@@ -66,39 +64,39 @@ class Report:
 # Use case 1: consolidate one seller submission.
 # --------------------------------------------------------------------------- #
 class ConsolidateEntryUseCase:
-    """Apply one validated feed entry inside the caller's transaction."""
+    """Apply one validated feed entry inside the caller's transaction.
+
+    Receives the working :class:`~consolidation.domain.Catalog` and a
+    :class:`~consolidation.repository.CatalogRepositories` bundle — every database
+    access already instantiated against the run's connection.
+    """
 
     def __init__(
         self,
-        conn: Connection,
-        catalog,
+        catalog: Catalog,
+        repositories: CatalogRepositories,
         similarity: Similarity,
         threshold: float,
     ) -> None:
-        self.conn = conn
         self.catalog = catalog
+        self.repositories = repositories
         self.resolver = ProductIdentityResolver(similarity, threshold)
-        self.brands = BrandRepository(conn)
-        self.categories = CategoryRepository(conn)
-        self.sellers = SellerRepository(conn)
-        self.products = ProductRepository(conn)
-        self.listings = SellerListingRepository(conn)
 
     # -- steps ------------------------------------------------------------- #
     def _create_product(self, submission: Submission) -> Product:
-        brand_id = self.brands.get_or_create(submission.Brand)
+        brand_id = self.repositories.brands.get_or_create(submission.Brand)
         product = Product(new_uuid(), submission.Name, submission.Brand)
-        self.products.add(product, brand_id)
+        self.repositories.products.add(product, brand_id)
         self._attach_category(product, submission.Category)
         self.catalog.add(product)
         return product
 
     def _attach_category(self, product: Product, raw_category: str | None) -> bool:
         """Persist the membership and update the aggregate. Returns divergence."""
-        category_id = self.categories.get_or_create(raw_category)
+        category_id = self.repositories.categories.get_or_create(raw_category)
         if not category_id or not normalize(raw_category):
             return False
-        self.products.add_category_membership(product.id, category_id)
+        self.repositories.products.add_category_membership(product.id, category_id)
         return product.record_category(raw_category)
 
     def _link(
@@ -109,7 +107,8 @@ class ConsolidateEntryUseCase:
         record_index: int,
         report: Report,
     ) -> None:
-        bound_product = self.listings.product_for_sku(seller_id, submission.Id)
+        listings = self.repositories.listings
+        bound_product = listings.product_for_sku(seller_id, submission.Id)
         if bound_product and bound_product != product.id:
             report.skipped += 1
             report.skipped_entries.append(
@@ -118,7 +117,7 @@ class ConsolidateEntryUseCase:
             logger.warning("event=skip record=%d reason=external_sku_conflict", record_index)
             return
 
-        existing_sku = self.listings.sku_for_pair(seller_id, product.id)
+        existing_sku = listings.sku_for_pair(seller_id, product.id)
         if existing_sku is not None:
             if existing_sku != submission.Id:
                 logger.info(
@@ -129,7 +128,7 @@ class ConsolidateEntryUseCase:
                 )
             return
 
-        if self.listings.link(seller_id, product.id, submission.Id):
+        if listings.link(seller_id, product.id, submission.Id):
             report.linked += 1
 
     # -- entry point ----------------------------------------------------- #
@@ -161,11 +160,13 @@ class ConsolidateEntryUseCase:
             return
 
         product = resolution.product
-        seller_id = self.sellers.id_for(submission.SellerName)
+        seller_id = self.repositories.sellers.id_for(submission.SellerName)
 
         if product is None:
             bound_product = (
-                self.listings.product_for_sku(seller_id, submission.Id) if seller_id else None
+                self.repositories.listings.product_for_sku(seller_id, submission.Id)
+                if seller_id
+                else None
             )
             if bound_product:
                 product = next((p for p in self.catalog.products if p.id == bound_product), None)
@@ -201,7 +202,7 @@ class ConsolidateEntryUseCase:
                 "event=category_divergence record=%d product_id=%s", record_index, product.id
             )
 
-        seller_id = seller_id or self.sellers.get_or_create(submission.SellerName)
+        seller_id = seller_id or self.repositories.sellers.get_or_create(submission.SellerName)
         self._link(seller_id, product, submission, record_index, report)
 
 
@@ -213,8 +214,14 @@ class ConsolidateCatalogUseCase:
     feed through :class:`ConsolidateEntryUseCase` (one transaction per entry), and
     publish the output atomically only on success.
 
-    The similarity backend is injected as an already-constructed instance — the
-    composition root (``cli``) chooses it via ``infrastructure.build_similarity``.
+    Injected collaborators:
+
+    * ``similarity`` — an already-constructed ``Similarity`` backend (the
+      composition root picks it via ``infrastructure.build_similarity``);
+    * ``repositories`` — a factory ``(Connection) -> CatalogRepositories`` that
+      builds the whole database-access bundle for the run's connection. A test
+      can pass a fake here; the default is the real bundle.
+
     Construct with the resolved configuration and call :meth:`execute`, which
     returns a process exit code (``0`` ok, ``1`` on any failure or item failure).
     """
@@ -227,12 +234,14 @@ class ConsolidateCatalogUseCase:
         output: str | Path,
         similarity: Similarity,
         threshold: float,
+        repositories: RepositoriesFactory = CatalogRepositories,
     ) -> None:
         self.catalog_url = catalog_url
         self.products_url = products_url
         self.output = Path(output).resolve()
         self.similarity = similarity
         self.threshold = threshold
+        self.repositories = repositories
 
     # -- public entry point --------------------------------------------- #
     def execute(self) -> int:
@@ -287,7 +296,7 @@ class ConsolidateCatalogUseCase:
 
     @staticmethod
     def _refactor_schema(conn: Connection, trans) -> None:
-        source = schema.classify_source(conn)
+        source = classify_source(conn)
         logger.info("source classified as=%s", source)
         if source == "unrecognized":
             raise RuntimeError("unrecognized catalog schema; aborting before any write")
@@ -306,8 +315,9 @@ class ConsolidateCatalogUseCase:
     def _new_entry_use_case(self, conn: Connection) -> ConsolidateEntryUseCase:
         """Build the per-entry use case, priming its in-memory indexes from the DB.
         Also used to rebuild them after an item transaction is rolled back."""
+        repositories = self.repositories(conn)
         use_case = ConsolidateEntryUseCase(
-            conn, load_catalog(conn), self.similarity, self.threshold
+            repositories.load_catalog(), repositories, self.similarity, self.threshold
         )
         conn.commit()
         return use_case
