@@ -98,6 +98,10 @@ CREATE TABLE SellerProduct (             -- many-to-many link + the seller's own
 `BrandProduct` / `CategoryProduct` junctions. `SellerProduct` is a junction because a
 product genuinely has many sellers.
 
+#### Target schema diagram
+
+![Target schema](../docs/target-schema.png)
+
 ### Kept / replaced / deleted
 
 - **`Product`** — dropped and recreated. `Name` carried over for all 975 rows; `Id`
