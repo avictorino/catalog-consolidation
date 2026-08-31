@@ -1,9 +1,10 @@
-"""Schema upgrade: target schema, source classification, and the refactor steps.
+"""Source classification and the one-way legacy → target migration steps.
 
-Everything that reshapes the database lives here — the declarative target schema
-(SQLAlchemy Core ``Table`` metadata), the introspection that classifies a downloaded
-database, and the data-migration helpers the Alembic revision calls to build the new
-model, copy data between tables, and drop the denormalized columns.
+The introspection that classifies a downloaded database and the data-migration
+helpers the Alembic revision calls (build staged tables, copy data, drop the
+denormalized columns) live here. The declarative target schema is in
+``consolidation.schema``; the connection/transaction lifecycle that drives these
+steps is in ``consolidation.repository``.
 
 The full target schema and the migration steps are specified in
 ``spec/data-profile.md#refactored-database``.
@@ -12,86 +13,17 @@ The full target schema and the migration steps are specified in
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Literal
 
-from sqlalchemy import (
-    Column,
-    ForeignKey,
-    Index,
-    MetaData,
-    String,
-    Table,
-    UniqueConstraint,
-    inspect,
-    text,
-)
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
+from consolidation.schema import new_uuid
 from consolidation.util import normalize
 
 logger = logging.getLogger("consolidation")
 
 SourceKind = Literal["legacy", "migrated", "unrecognized"]
-
-TARGET_TABLES = ("Brand", "Category", "Product", "ProductCategory", "Seller", "SellerProduct")
-
-# --------------------------------------------------------------------------- #
-# Target schema (canonical names). Used for introspection and by the feed
-# import; the refactor below builds the same shape via staged tables.
-# --------------------------------------------------------------------------- #
-metadata = MetaData()
-
-Brand = Table(
-    "Brand",
-    metadata,
-    Column("Id", String, primary_key=True),  # uuid4
-    Column("Name", String, nullable=False, unique=True),  # capitalized normalized name
-)
-
-Category = Table(
-    "Category",
-    metadata,
-    Column("Id", String, primary_key=True),  # uuid4
-    Column("Name", String, nullable=False, unique=True),  # capitalized normalized name
-)
-
-Seller = Table(
-    "Seller",
-    metadata,
-    Column("Id", String, primary_key=True),  # uuid4
-    Column("Name", String, nullable=False, unique=True),
-)
-
-Product = Table(
-    "Product",
-    metadata,
-    Column("Id", String, primary_key=True),  # uuid4
-    Column("Name", String, nullable=False),
-    Column("BrandId", String, ForeignKey("Brand.Id")),  # nullable
-)
-
-ProductCategory = Table(
-    "ProductCategory",
-    metadata,
-    Column("ProductId", String, ForeignKey("Product.Id"), primary_key=True, nullable=False),
-    Column("CategoryId", String, ForeignKey("Category.Id"), primary_key=True, nullable=False),
-)
-Index("ix_ProductCategory_CategoryId", ProductCategory.c.CategoryId)
-
-SellerProduct = Table(
-    "SellerProduct",
-    metadata,
-    Column("SellerId", String, ForeignKey("Seller.Id"), primary_key=True, nullable=False),
-    Column("ProductId", String, ForeignKey("Product.Id"), primary_key=True, nullable=False),
-    Column("ExternalSku", String, nullable=False),  # the feed entry's Id (opaque)
-    UniqueConstraint("SellerId", "ExternalSku"),
-)
-
-
-def new_uuid() -> str:
-    """A fresh ``uuid4`` as a 36-char string, minted in Python (no DB coordination)."""
-    return str(uuid.uuid4())
 
 
 # --------------------------------------------------------------------------- #

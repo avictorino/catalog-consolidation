@@ -9,8 +9,9 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.engine import Connection
 
-from consolidation import db_upgrade, pipeline
+from consolidation import _refactor, pipeline, schema
 from consolidation.feed import ProductEntry
+from consolidation.importer import FeedImporter
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -251,7 +252,7 @@ def test_pipeline_isolates_item_failure_and_logs_it(
             }
         ),
     ]
-    original_process = pipeline.FeedImporter.process
+    original_process = FeedImporter.process
 
     def fail_one_item(self, entry, record_index, report) -> None:
         if record_index == 1:
@@ -259,7 +260,7 @@ def test_pipeline_isolates_item_failure_and_logs_it(
         original_process(self, entry, record_index, report)
 
     monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
-    monkeypatch.setattr(pipeline.FeedImporter, "process", fail_one_item)
+    monkeypatch.setattr(FeedImporter, "process", fail_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.ERROR, logger="consolidation"):
@@ -321,30 +322,30 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             Category="New Category",
         ),
     ]
-    original_process = pipeline.FeedImporter.process
+    original_process = FeedImporter.process
     enforcement = []
 
     def violate_one_item(self, entry, record_index, report) -> None:
         enforcement.append(self.conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
         original_process(self, entry, record_index, report)
         if record_index == 1:
-            table = db_upgrade.metadata.tables[table_name]
+            table = schema.metadata.tables[table_name]
             if table_name == "Product":
                 where = table.c.Name == entry.Name
             elif table_name == "ProductCategory":
                 product_id = self.conn.scalar(
-                    db_upgrade.Product.select()
-                    .with_only_columns(db_upgrade.Product.c.Id)
-                    .where(db_upgrade.Product.c.Name == entry.Name)
+                    schema.Product.select()
+                    .with_only_columns(schema.Product.c.Id)
+                    .where(schema.Product.c.Name == entry.Name)
                 )
                 where = table.c.ProductId == product_id
             else:
                 where = table.c.ExternalSku == entry.Id
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
-            self.conn.execute(update(table).where(where).values({column: db_upgrade.new_uuid()}))
+            self.conn.execute(update(table).where(where).values({column: schema.new_uuid()}))
 
     monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
-    monkeypatch.setattr(pipeline.FeedImporter, "process", violate_one_item)
+    monkeypatch.setattr(FeedImporter, "process", violate_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.INFO, logger="consolidation"):
@@ -414,7 +415,7 @@ def test_pipeline_rollback_preserves_previous_output(
     def boom(conn) -> None:
         raise RuntimeError("injected failure after pending inserts")
 
-    monkeypatch.setattr(db_upgrade, "foreign_key_check", boom)
+    monkeypatch.setattr(_refactor, "foreign_key_check", boom)
     assert pipeline.run(**_config(output)) == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []

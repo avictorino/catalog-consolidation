@@ -13,15 +13,19 @@ Working rules for AI assistance on this repository.
 - The specification is authoritative. If code and spec disagree, fix the code or raise
   the discrepancy — do not silently diverge.
 - Keep the surface small: a handful of modules, small functions, explicit composition.
-  No DI container, no generic repository layer, no deep class hierarchies.
+  One `CatalogRepository` (`consolidation.repository`) owns the downloaded database —
+  connection/transaction lifecycle, the Alembic-driven refactor, FK enforcement, and the
+  per-entry import transactions — and `pipeline.run` depends on it through the `Catalog`
+  protocol. Beyond that: no DI container, no ORM, no deep class hierarchies.
 
 ## Design constraints
 
 - **DB refactor**: implement exactly as `spec/data-profile.md#refactored-database`
   specifies — do not restate the schema or the steps elsewhere. SQLAlchemy Core for the
   schema and statements (no ORM); the refactor is a single Alembic revision (`0001`)
-  driven programmatically with an injected connection, so it runs inside the setup
-  transaction. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
+  driven programmatically by `CatalogRepository` with an injected connection, so it runs
+  inside the setup transaction. The declarative target schema lives in
+  `consolidation.schema`; the migration steps in `consolidation._refactor`. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
   Alembic's `alembic_version` marker (legacy source migrated, already-migrated source
   left alone, unrecognized schema aborts).
 - Commit the schema refactor before feed processing, then use one transaction per feed

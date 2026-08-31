@@ -3,18 +3,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from sqlalchemy import create_engine
-
-from consolidation import db_upgrade
+from consolidation import schema
+from consolidation.repository import CatalogRepository
 
 
 def _classify(db_path: Path) -> str:
-    engine = create_engine(f"sqlite:///{db_path}")
-    try:
-        with engine.connect() as conn:
-            return db_upgrade.classify_source(conn)
-    finally:
-        engine.dispose()
+    with CatalogRepository(db_path) as repo:
+        return repo.classify_source()
 
 
 def test_classify_legacy(legacy_db: Path) -> None:
@@ -42,6 +37,6 @@ def test_classify_unrecognized_partial(tmp_path: Path) -> None:
 
 
 def test_new_uuid_shape() -> None:
-    value = db_upgrade.new_uuid()
+    value = schema.new_uuid()
     assert len(value) == 36
     assert value.count("-") == 4

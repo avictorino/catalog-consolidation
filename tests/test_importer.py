@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, func, select
 
-from consolidation import db_upgrade
+from consolidation import schema
 from consolidation.feed import ProductEntry, Report
 from consolidation.importer import (
     CatalogIndex,
@@ -155,20 +155,15 @@ def test_new_product_is_reused_for_reordered_listing(
             assert report.new == 1
             assert report.linked == 2
             assert report.skipped == 0
-            assert (
-                conn.scalar(select(func.count()).select_from(db_upgrade.Product))
-                == PRODUCT_ROWS + 1
-            )
+            assert conn.scalar(select(func.count()).select_from(schema.Product)) == PRODUCT_ROWS + 1
             product_id = conn.scalar(
-                select(db_upgrade.Product.c.Id).where(
-                    db_upgrade.Product.c.Name == "Smartphone Galaxy S23"
-                )
+                select(schema.Product.c.Id).where(schema.Product.c.Name == "Smartphone Galaxy S23")
             )
             assert product_id is not None
             assert conn.execute(
                 select(
-                    db_upgrade.SellerProduct.c.ProductId, db_upgrade.SellerProduct.c.ExternalSku
-                ).order_by(db_upgrade.SellerProduct.c.ExternalSku)
+                    schema.SellerProduct.c.ProductId, schema.SellerProduct.c.ExternalSku
+                ).order_by(schema.SellerProduct.c.ExternalSku)
             ).all() == [(product_id, "sku-1"), (product_id, "sku-2")]
     finally:
         engine.dispose()
@@ -240,25 +235,21 @@ def test_importer_persists_links_idempotently(migrated_db: Path, caplog) -> None
             assert report.threat == 0
             assert any("category_divergence" in record.message for record in caplog.records)
             assert conn.execute(
-                db_upgrade.SellerProduct.select().with_only_columns(
-                    db_upgrade.SellerProduct.c.ExternalSku
-                )
+                schema.SellerProduct.select().with_only_columns(schema.SellerProduct.c.ExternalSku)
             ).all() == [("sku-1",)]
             product_id = conn.scalar(
-                select(db_upgrade.Product.c.Id).where(
-                    db_upgrade.Product.c.Name == "Camera Canon EOS R6"
-                )
+                select(schema.Product.c.Id).where(schema.Product.c.Name == "Camera Canon EOS R6")
             )
             category_names = conn.execute(
-                select(db_upgrade.Category.c.Name)
+                select(schema.Category.c.Name)
                 .select_from(
-                    db_upgrade.ProductCategory.join(
-                        db_upgrade.Category,
-                        db_upgrade.ProductCategory.c.CategoryId == db_upgrade.Category.c.Id,
+                    schema.ProductCategory.join(
+                        schema.Category,
+                        schema.ProductCategory.c.CategoryId == schema.Category.c.Id,
                     )
                 )
-                .where(db_upgrade.ProductCategory.c.ProductId == product_id)
-                .order_by(db_upgrade.Category.c.Name)
+                .where(schema.ProductCategory.c.ProductId == product_id)
+                .order_by(schema.Category.c.Name)
             ).all()
             assert category_names == [("Photo",), ("Photography",)]
     finally:

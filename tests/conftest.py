@@ -6,10 +6,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from alembic import command
-from sqlalchemy import create_engine
 
-from consolidation.pipeline import _alembic_config
+from consolidation.repository import CatalogRepository
 
 # A legacy catalog exercising every migration concern at tiny scale:
 # - two brands that merge on normalization (BLACK+DECKER / Black+DECKER)
@@ -43,19 +41,9 @@ PRODUCT_ROWS = 6
 
 
 def apply_refactor(db_path: Path) -> None:
-    """Run Alembic ``upgrade head`` inside one transaction, like the pipeline does."""
-    engine = create_engine(f"sqlite:///{db_path}")
-    try:
-        with engine.connect() as conn:
-            trans = conn.begin()
-            try:
-                command.upgrade(_alembic_config(conn), "head")
-                trans.commit()
-            except Exception:
-                trans.rollback()
-                raise
-    finally:
-        engine.dispose()
+    """Run the schema refactor through the repository, exactly as the pipeline does."""
+    with CatalogRepository(db_path) as repo:
+        repo.migrate()
 
 
 @pytest.fixture

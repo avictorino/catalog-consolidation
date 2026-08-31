@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from sqlalchemy import insert, select
 from sqlalchemy.engine import Connection
 
-from consolidation import db_upgrade
+from consolidation import schema
 from consolidation.feed import ProductEntry, Report, screen_entry
 from consolidation.similarity import Similarity
 from consolidation.util import normalize
@@ -46,21 +46,19 @@ class CatalogIndex:
 def load_catalog(conn: Connection) -> CatalogIndex:
     """Read the target catalog once; fuzzy retrieval remains a plain product scan."""
     query = select(
-        db_upgrade.Product.c.Id,
-        db_upgrade.Product.c.Name,
-        db_upgrade.Brand.c.Name.label("BrandName"),
-        db_upgrade.Category.c.Name.label("CategoryName"),
+        schema.Product.c.Id,
+        schema.Product.c.Name,
+        schema.Brand.c.Name.label("BrandName"),
+        schema.Category.c.Name.label("CategoryName"),
     ).select_from(
-        db_upgrade.Product.outerjoin(
-            db_upgrade.Brand, db_upgrade.Product.c.BrandId == db_upgrade.Brand.c.Id
+        schema.Product.outerjoin(schema.Brand, schema.Product.c.BrandId == schema.Brand.c.Id)
+        .outerjoin(
+            schema.ProductCategory,
+            schema.Product.c.Id == schema.ProductCategory.c.ProductId,
         )
         .outerjoin(
-            db_upgrade.ProductCategory,
-            db_upgrade.Product.c.Id == db_upgrade.ProductCategory.c.ProductId,
-        )
-        .outerjoin(
-            db_upgrade.Category,
-            db_upgrade.ProductCategory.c.CategoryId == db_upgrade.Category.c.Id,
+            schema.Category,
+            schema.ProductCategory.c.CategoryId == schema.Category.c.Id,
         )
     )
     product_data: dict[str, tuple[str, str | None, list[str]]] = {}
@@ -165,8 +163,8 @@ class FeedImporter:
         self.catalog = catalog
         self.similarity = similarity
         self.threshold = threshold
-        self.brand_ids = self._load_reference_ids(db_upgrade.Brand)
-        self.category_ids = self._load_reference_ids(db_upgrade.Category)
+        self.brand_ids = self._load_reference_ids(schema.Brand)
+        self.category_ids = self._load_reference_ids(schema.Category)
         self.seller_ids = self._load_seller_ids()
 
     def _load_reference_ids(self, table) -> dict[str, str]:
@@ -179,9 +177,7 @@ class FeedImporter:
     def _load_seller_ids(self) -> dict[str, str]:
         return {
             name: id
-            for id, name in self.conn.execute(
-                select(db_upgrade.Seller.c.Id, db_upgrade.Seller.c.Name)
-            )
+            for id, name in self.conn.execute(select(schema.Seller.c.Id, schema.Seller.c.Name))
         }
 
     def _reference_id(self, table, cache: dict[str, str], raw_name: str | None) -> str | None:
@@ -191,7 +187,7 @@ class FeedImporter:
         existing = cache.get(normalized)
         if existing:
             return existing
-        new_id = db_upgrade.new_uuid()
+        new_id = schema.new_uuid()
         self.conn.execute(insert(table).values(Id=new_id, Name=normalized.title()))
         cache[normalized] = new_id
         return new_id
@@ -200,16 +196,16 @@ class FeedImporter:
         existing = self.seller_ids.get(seller_name)
         if existing:
             return existing
-        new_id = db_upgrade.new_uuid()
-        self.conn.execute(insert(db_upgrade.Seller).values(Id=new_id, Name=seller_name))
+        new_id = schema.new_uuid()
+        self.conn.execute(insert(schema.Seller).values(Id=new_id, Name=seller_name))
         self.seller_ids[seller_name] = new_id
         return new_id
 
     def _insert_product(self, entry: ProductEntry) -> CatalogProduct:
-        brand_id = self._reference_id(db_upgrade.Brand, self.brand_ids, entry.Brand)
-        product = CatalogProduct(db_upgrade.new_uuid(), entry.Name, entry.Brand)
+        brand_id = self._reference_id(schema.Brand, self.brand_ids, entry.Brand)
+        product = CatalogProduct(schema.new_uuid(), entry.Name, entry.Brand)
         self.conn.execute(
-            insert(db_upgrade.Product).values(
+            insert(schema.Product).values(
                 Id=product.id,
                 Name=product.name,
                 BrandId=brand_id,
@@ -220,12 +216,12 @@ class FeedImporter:
         return product
 
     def _attach_category(self, product: CatalogProduct, raw_category: str | None) -> None:
-        category_id = self._reference_id(db_upgrade.Category, self.category_ids, raw_category)
+        category_id = self._reference_id(schema.Category, self.category_ids, raw_category)
         normalized = normalize(raw_category)
         if not category_id or not normalized:
             return
         self.conn.execute(
-            insert(db_upgrade.ProductCategory)
+            insert(schema.ProductCategory)
             .values(ProductId=product.id, CategoryId=category_id)
             .prefix_with("OR IGNORE")
         )
@@ -234,9 +230,9 @@ class FeedImporter:
 
     def _existing_sku_product(self, seller_id: str, external_sku: str) -> str | None:
         return self.conn.execute(
-            select(db_upgrade.SellerProduct.c.ProductId).where(
-                db_upgrade.SellerProduct.c.SellerId == seller_id,
-                db_upgrade.SellerProduct.c.ExternalSku == external_sku,
+            select(schema.SellerProduct.c.ProductId).where(
+                schema.SellerProduct.c.SellerId == seller_id,
+                schema.SellerProduct.c.ExternalSku == external_sku,
             )
         ).scalar_one_or_none()
 
@@ -258,9 +254,9 @@ class FeedImporter:
             return
 
         existing_pair = self.conn.execute(
-            select(db_upgrade.SellerProduct.c.ExternalSku).where(
-                db_upgrade.SellerProduct.c.SellerId == seller_id,
-                db_upgrade.SellerProduct.c.ProductId == product.id,
+            select(schema.SellerProduct.c.ExternalSku).where(
+                schema.SellerProduct.c.SellerId == seller_id,
+                schema.SellerProduct.c.ProductId == product.id,
             )
         ).scalar_one_or_none()
         if existing_pair is not None:
@@ -273,7 +269,7 @@ class FeedImporter:
                 )
             return
 
-        statement = insert(db_upgrade.SellerProduct).values(
+        statement = insert(schema.SellerProduct).values(
             SellerId=seller_id,
             ProductId=product.id,
             ExternalSku=entry.Id,
