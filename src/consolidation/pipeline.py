@@ -1,12 +1,4 @@
-"""End-to-end execution of the consolidation tool.
-
-One run: download the base catalog, classify it, and — inside a single transaction —
-apply the schema refactor (Alembic revision ``0001``). Feed import is PR #3; for now
-the pipeline stops after the refactor and publishes the refactored catalog.
-
-Any failure rolls the transaction back, discards the temp file, and leaves the
-previous output untouched.
-"""
+"""End-to-end execution of the consolidation tool."""
 
 from __future__ import annotations
 
@@ -18,6 +10,9 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine
 
 from consolidation import db_upgrade
+from consolidation.feed import FeedValidationError, Report, iter_feed
+from consolidation.importer import FeedImporter, load_catalog
+from consolidation.similarity import build_similarity
 from consolidation.util import download_to, verify_sqlite_header
 
 logger = logging.getLogger("consolidation")
@@ -52,7 +47,7 @@ def run(
 ) -> int:
     """Execute one consolidation run. Returns a process exit code."""
     logger.info(
-        "run config products_url=%s matcher=%s threshold=%s (feed import: PR #3)",
+        "run config products_url=%s matcher=%s threshold=%s",
         products_url,
         matcher,
         threshold,
@@ -76,8 +71,28 @@ def run(
                     command.upgrade(_alembic_config(conn), "head")
                     logger.info("schema refactor applied (pending commit)")
 
-                    # TODO(PR #3): stream ProductEntry.json and consolidate the feed here,
-                    # inside this same transaction.
+                    similarity = build_similarity(matcher)
+                    catalog = load_catalog(conn)
+                    importer = FeedImporter(conn, catalog, similarity, threshold)
+                    report = Report()
+                    for record_index, entry in enumerate(iter_feed(products_url)):
+                        report.processed += 1
+                        if record_index == 0:
+                            logger.info("first feed record received")
+                        importer.process(entry, record_index, report)
+                        if report.processed % 1000 == 0:
+                            logger.info("feed progress processed=%d", report.processed)
+
+                    logger.info(
+                        "feed summary processed=%d new=%d linked=%d skipped=%d threat=%d",
+                        report.processed,
+                        report.new,
+                        report.linked,
+                        report.skipped,
+                        report.threat,
+                    )
+                    if report.threat:
+                        logger.warning("feed threats rejected=%d", report.threat)
 
                     trans.commit()
                     logger.info("commit complete")
@@ -91,6 +106,10 @@ def run(
         _publish(tmp, output)
         tmp = None
         return 0
+    except FeedValidationError as exc:
+        logger.error("feed validation failed record=%d fields=%s", exc.record_index, exc.fields)
+        logger.exception("run failed")
+        return 1
     except Exception:
         logger.exception("run failed")
         return 1

@@ -10,9 +10,9 @@ introduces one, never duplicating an existing item.
 
 ## Status
 
-Download + schema refactor implemented (PR #2). The feed import (JSON streaming,
-validation, injection screen, identity resolution) is PR #3 — the pipeline currently
-stops after the refactor and publishes the refactored base catalog.
+Download, schema refactor, and feed import are implemented. The feed is streamed from
+JSON, validated one record at a time, screened for injection, and resolved against the
+catalog before publication.
 
 - [`prd.md`](prd.md) — design rationale and decisions (why).
 - [`spec/data-profile.md`](spec/data-profile.md) — input-data profile, **the refactored schema and migration** (source of truth), and the expected result.
@@ -76,7 +76,7 @@ cp .env.example .env
 `libinjection-python` has no wheel for Python 3.11/3.12 yet and builds from source: on
 Linux/CI the toolchain is present; on Windows install MSVC build tools or use WSL.
 
-## Verification (once code exists)
+## Verification
 
 ```bash
 ruff check . && ruff format --check .

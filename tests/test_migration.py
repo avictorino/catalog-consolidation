@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from consolidation import db_upgrade, pipeline
+from consolidation.feed import ProductEntry
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -87,6 +88,7 @@ def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
         return tmp
 
     monkeypatch.setattr(pipeline, "download_to", fake_download_to)
+    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(()))
     return legacy_db
 
 
@@ -107,6 +109,47 @@ def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Pa
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _rows(output, "PRAGMA foreign_key_check") == []
     assert list((tmp_path / "out").glob("*.tmp")) == []
+
+
+def test_pipeline_imports_feed_inside_transaction(
+    _stub_download: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entries = [
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-1",
+                "SellerName": "GardenStore",
+                "Name": "Camera Canon EOS R6",
+                "Brand": "Canon",
+                "Category": "Photo",
+            }
+        ),
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-threat",
+                "SellerName": "MegaStore",
+                "Name": "Security Test Product",
+                "Brand": "TestBrand'; SELECT 1; --",
+                "Category": "Security",
+            }
+        ),
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-2",
+                "SellerName": "GardenStore",
+                "Name": "Camera Canon EOS R6",
+                "Brand": "Canon",
+                "Category": "Photography",
+            }
+        ),
+    ]
+    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    output = tmp_path / "catalog_output.db"
+
+    assert pipeline.run(**_config(output)) == 0
+    assert _count(output, "Product") == PRODUCT_ROWS
+    assert _count(output, "Seller") == 1
+    assert _count(output, "SellerProduct") == 1
 
 
 def test_pipeline_rollback_preserves_previous_output(
