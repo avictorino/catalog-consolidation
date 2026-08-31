@@ -1,10 +1,10 @@
 """Declarative target schema (SQLAlchemy Core ``Table`` metadata) and the id minter.
 
 This is the canonical shape of the refactored catalog, shared by the feed import
-(``consolidation.importer``) and the Alembic ``target_metadata``. The migration steps
-that build this shape from a legacy database live in ``consolidation._refactor``; the
-connection/transaction lifecycle that runs them lives in
-``consolidation.repository``.
+(``consolidation.repository``) and the Alembic ``target_metadata``. The migration steps
+that build this shape from a legacy database are the ``0001`` revision itself
+(``migrations/versions/0001_refactor_catalog.py``); the connection/transaction lifecycle
+that runs them lives in ``consolidation.repository``.
 
 The full target schema is specified in ``spec/data-profile.md#refactored-database``.
 """

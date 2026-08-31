@@ -9,9 +9,9 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.engine import Connection
 
-from consolidation import _refactor, pipeline, schema
+from consolidation import pipeline, repository, schema
 from consolidation.feed import ProductEntry
-from consolidation.importer import FeedImporter
+from consolidation.repository import FeedImporter
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -412,10 +412,15 @@ def test_pipeline_rollback_preserves_previous_output(
     output = tmp_path / "catalog_output.db"
     output.write_bytes(b"SQLite format 3\x00previous")
 
-    def boom(conn) -> None:
+    # Let the whole refactor run, then fail before the setup transaction commits:
+    # migrate() must roll the pending inserts back and leave the previous output intact.
+    real_upgrade = repository.command.upgrade
+
+    def upgrade_then_boom(*args: object, **kwargs: object) -> None:
+        real_upgrade(*args, **kwargs)
         raise RuntimeError("injected failure after pending inserts")
 
-    monkeypatch.setattr(_refactor, "foreign_key_check", boom)
+    monkeypatch.setattr(repository.command, "upgrade", upgrade_then_boom)
     assert pipeline.run(**_config(output)) == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []

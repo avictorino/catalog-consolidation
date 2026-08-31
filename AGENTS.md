@@ -25,9 +25,10 @@ Working rules for AI assistance on this repository.
   schema and statements (no ORM); the refactor is a single Alembic revision (`0001`)
   driven programmatically by `CatalogRepository` with an injected connection, so it runs
   inside the setup transaction. The declarative target schema lives in
-  `consolidation.schema`; the migration steps in `consolidation._refactor`. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
-  Alembic's `alembic_version` marker (legacy source migrated, already-migrated source
-  left alone, unrecognized schema aborts).
+  `consolidation.schema`; the migration steps are the `0001` revision itself. `uuid4`
+  `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on Alembic's `alembic_version`
+  marker (legacy source migrated, already-migrated source left alone, unrecognized
+  schema aborts).
 - Commit the schema refactor before feed processing, then use one transaction per feed
   entry. A failed entry is rolled back in isolation, recorded in the final report, and
   does not prevent later entries from being attempted. All feed writes are idempotent.

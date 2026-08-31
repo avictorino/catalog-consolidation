@@ -124,7 +124,7 @@ python -m consolidation.cli \
 ### Why `rapidfuzz` is the default
 
 Product names can contain the same words in a different order, for example
-`Smartphone Galaxy S23` and `Galaxy S23 Smartphone`. The importer therefore resolves
+`Smartphone Galaxy S23` and `Galaxy S23 Smartphone`. The resolver therefore matches
 exact normalized names and equal word multisets before it invokes fuzzy matching. This
 deterministic step is what handles word order; neither fuzzy backend should be trusted
 to infer that relationship by itself.

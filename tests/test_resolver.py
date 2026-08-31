@@ -7,13 +7,8 @@ from sqlalchemy import create_engine, func, select
 
 from consolidation import schema
 from consolidation.feed import ProductEntry, Report
-from consolidation.importer import (
-    CatalogIndex,
-    CatalogProduct,
-    FeedImporter,
-    load_catalog,
-    resolve_product,
-)
+from consolidation.repository import FeedImporter, load_catalog
+from consolidation.resolver import CatalogIndex, CatalogProduct, resolve_product
 from consolidation.similarity import DifflibSimilarity, RapidFuzzSimilarity, Similarity
 
 from .conftest import PRODUCT_ROWS
