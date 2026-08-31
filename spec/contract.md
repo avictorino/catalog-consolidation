@@ -208,6 +208,8 @@ Exit codes:
   tolerated category divergence, replacement of an existing output, non-TLS URL. When
   `threat > 0`, a summary `WARNING` repeats the count.
 - `ERROR`: download, parsing, schema validation, persistence, publication failures.
+  Feed item persistence failures are printed after the feed is exhausted with the
+  record index and the captured reason.
 - Never logged: full records, `.env` contents, signed URLs, values rejected by Pydantic.
   A threat log includes the offending value truncated to 120 characters (needed for
   forensics), never the whole record.

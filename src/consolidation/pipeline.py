@@ -67,10 +67,10 @@ def _log_feed_summary(report: Report) -> None:
     if report.threat:
         logger.warning("feed threats rejected=%d", report.threat)
     if report.failures:
-        logger.error("feed item failures count=%d", report.failed)
+        logger.error("feed item failures count=%d; details follow", report.failed)
         for failure in report.failures:
             logger.error(
-                "feed item failure record=%d error=%s",
+                "feed item failure record=%d reason=%s",
                 failure["record_index"],
                 failure["error"],
             )
