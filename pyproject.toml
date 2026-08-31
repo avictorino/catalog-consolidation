@@ -1,0 +1,45 @@
+[project]
+name = "catalog-consolidation"
+version = "0.0.0"
+description = "Consolidate seller product feeds into a marketplace catalog"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests==2.33.0",
+    "ijson==3.3.0",
+    "pydantic==2.10.4",
+    "rapidfuzz==3.11.0",
+    "python-dotenv==1.2.2",
+    "libinjection-python==1.1.6",
+    "SQLAlchemy==2.0.36",
+]
+
+[project.scripts]
+catalog-consolidation = "consolidation.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "PTH", "RUF", "S"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
