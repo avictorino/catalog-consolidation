@@ -7,7 +7,8 @@ Against the currently published sources, with either matcher backend:
 | Metric | Value | Derivation |
 | --- | --- | --- |
 | `Brand` rows after import | **637** | distinct normalized catalog brands (`BLACK+DECKER`/`Black+Decker` and `Simplehuman`/`simplehuman` each merge); no new brands from the feed |
-| `Product` rows after import | **975** | base 975; the only new-product candidate (`Security Test Product`) is rejected as a threat. 119 rows have `BrandId IS NULL` |
+| `Category` rows after import | **43** | distinct normalized catalog categories (no merges); no new categories from the feed |
+| `Product` rows after import | **975** | base 975; the only new-product candidate (`Security Test Product`) is rejected as a threat. 119 rows have `BrandId IS NULL`, 34 have `CategoryId IS NULL` |
 | `Seller` rows after import | **20** | distinct `SellerName` values in the feed |
 | `SellerProduct` rows after import | **256** | distinct `(SellerId, ProductId)`; 12 feed entries re-offer a product the seller already has (11 log `duplicate_listing`), 1 entry is a threat |
 | `new` | 0 | PT→EN name variants match existing products; the one genuine new product is a threat |
@@ -36,16 +37,18 @@ The tool must still be correct; only this table becomes stale.
 - Every run downloads the base catalog again; the previous output is never read as input.
 - The base catalog is downloaded in chunks to a temp file, not held whole in memory.
 - A corrupt or non-SQLite download is rejected before any write.
-- After the refactor the database has `Brand (Id, Name UNIQUE)`,
-  `Product (Id, Name, BrandId, Category)`, `Seller (Id, Name UNIQUE)`, and
+- After the refactor the database has `Brand (Id, Name UNIQUE)`, `Category (Id, Name UNIQUE)`,
+  `Product (Id, Name, BrandId, CategoryId)`, `Seller (Id, Name UNIQUE)`, and
   `SellerProduct (SellerId, ProductId, ExternalSku)` with `PRIMARY KEY (SellerId, ProductId)`
   and `UNIQUE (SellerId, ExternalSku)`; `foreign_key_check` passes; `user_version = 1`.
-- `Brand` holds 637 rows; every base `Product` keeps its `Id`, `Name`, `Category`, and
-  gets a `BrandId` (or `NULL`); no product row is lost.
-- The two catalog brands that differ only by case/punctuation share one `Brand` row.
-- The refactor is conditional: a legacy source (`user_version = 0`, `SellerProduct.SellerName`
-  present) is migrated; a source already at `user_version = 1` skips the migration and
-  goes straight to feed processing; an unrecognized schema aborts before any write.
+- `Product` no longer has `Brand` or `Category` text columns; every base row keeps its
+  `Id` and `Name` and gains a `BrandId` and `CategoryId` (each possibly `NULL`); no
+  product row is lost; `sqlite_sequence` for `Product` is unchanged.
+- `Brand` holds 637 rows (the two case/punctuation pairs merge); `Category` holds 43.
+- The refactor is conditional: a legacy source (`user_version = 0`, `Product.Brand` +
+  `Product.Category` text columns, `SellerProduct.SellerName`) is migrated; a source
+  already at `user_version = 1` skips the migrations; an unrecognized schema aborts
+  before any write.
 - Running the tool a second time against its own previous output (an already-migrated
   DB) with the same feed produces logically identical tables and reports 0 `new`.
 - The refactor runs inside the same transaction as feed processing; a later failure
@@ -64,8 +67,8 @@ The tool must still be correct; only this table becomes stale.
 - An invalid root (object instead of array) aborts before any write.
 - A JSON document truncated mid-stream aborts; the previous output is preserved.
 - An invalid record after several pending inserts triggers a full rollback; the previous
-  output is preserved.
-- `[]` as the feed is valid and produces an output equal to the base catalog.
+  output is preserved (including the schema refactor).
+- `[]` as the feed is valid and produces the refactored base catalog with no links.
 
 ### Identity
 
@@ -76,11 +79,12 @@ The tool must still be correct; only this table becomes stale.
 - A model/capacity difference (`128GB` vs `256GB`) → not matched, new product.
 - A constructed two-candidate case → entry skipped and reported, import continues.
 
-### Brands, sellers and links
+### Brands, categories, sellers and links
 
 - A brand name new to the database creates exactly one `Brand` row; brand names that
-  normalize equally share a row.
-- A product entry with `Brand = null` links/creates with `BrandId IS NULL`.
+  normalize equally share a row. Same for `Category`.
+- A new product with `Brand = null` is inserted with `BrandId IS NULL`; the migration
+  leaves the 119 brand-less and 34 category-less base rows with `NULL` FKs.
 - A seller name new to the database creates exactly one `Seller` row; the same name
   reuses it.
 - The same product offered by two different sellers produces two links, each with its
@@ -113,8 +117,8 @@ The tool must still be correct; only this table becomes stale.
   that somehow reached persistence would still be stored as an inert string, never
   executed.
 - Referential integrity holds after the refactor; every base `Product` survives with its
-  `Id`/`Name`/`Category` intact (only `Brand` → `BrandId`), and any pre-existing
-  `SellerProduct` rows survive the rebuild as `(SellerId, ProductId, ExternalSku)` links.
+  `Id` and `Name` intact (`Brand` → `BrandId`, `Category` → `CategoryId`), and any
+  pre-existing `SellerProduct` rows survive as `(SellerId, ProductId, ExternalSku)` links.
 
 ### Observability
 

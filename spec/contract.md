@@ -71,7 +71,8 @@ tokenizer/fingerprint engine used by WAFs such as ModSecurity.
 
 ### Normalization
 
-One function, applied identically to catalog names, feed names, and brand values:
+One function, applied identically to catalog names, feed names, brand values, and
+category values:
 
 1. Unicode NFKD, drop combining marks (accent folding).
 2. Lowercase.
@@ -100,13 +101,14 @@ this point.
 | Situation | Action |
 | --- | --- |
 | Exactly one product (exact match or one eligible fuzzy candidate) | `get_or_create` the seller, then `INSERT OR IGNORE` the `(SellerId, ProductId, ExternalSku)` link |
-| No product and no eligible candidate | `get_or_create` the brand, insert a new `Product`, then the link |
+| No product and no eligible candidate | `get_or_create` the brand and the category, insert a new `Product`, then the link |
 | The `(SellerId, ProductId)` link already exists | no change; if the incoming `ExternalSku` differs from the stored one, log `event=duplicate_listing` |
 | The incoming `(SellerId, ExternalSku)` already maps to a different product | skip the entry, record it (no silent re-association) |
 | Two or more eligible candidates, or a brand conflict on an otherwise-matching name | skip the entry, record it in the report, continue |
 
-- Attributes of existing products (including `BrandId`) are never enriched or overwritten.
-- `Category` never affects identity. A category difference between a linked entry and
+- Attributes of existing products (including `BrandId` and `CategoryId`) are never
+  enriched or overwritten.
+- `CategoryId` never affects identity. A category difference between a linked entry and
   its product is logged at `WARNING` and otherwise ignored.
 - `ExternalSku` stores the feed `Id` of the entry that first created the link.
 
@@ -126,18 +128,19 @@ this point.
 
 ## 5. Schema refactor (on the downloaded copy, before feed processing)
 
-The given model is compromised: denormalized `SellerName` and `Product.Brand`, mistyped
-`SellerProductId`, a pointless surrogate key, no uniqueness.
+The given model is compromised: denormalized `SellerName`, `Product.Brand`,
+`Product.Category`; mistyped `SellerProductId`; a pointless surrogate key; no
+uniqueness. It **is really altered**, not shadowed.
 
 ### Conditional migration
 
-The refactor is guarded by `PRAGMA user_version` so the tool can run incrementally
-against a database it has already produced:
+Guarded by `PRAGMA user_version` so the tool can run incrementally against a database
+it has already produced:
 
 | Source | Classified as | Action |
 | --- | --- | --- |
-| `user_version = 0` and legacy tables present (`Product.Brand`, `SellerProduct.SellerName`, `SellerProduct.SellerProductId`, no `Brand` table) | legacy | run the migration, then `PRAGMA user_version = 1` |
-| `user_version = 1` and target tables present (`Brand` table, `SellerProduct.ExternalSku`) | already migrated | skip the migration |
+| `user_version = 0` and legacy tables present (`Product.Brand` + `Product.Category` text columns, `SellerProduct.SellerName`, `SellerProduct.SellerProductId`, no `Brand`/`Category` tables) | legacy | run the migrations, then `PRAGMA user_version = 1` |
+| `user_version = 1` and target tables present (`Brand`, `Category`, `Seller`; `SellerProduct.ExternalSku`) | already migrated | skip the migrations |
 | neither | unrecognized | abort before any write, non-zero exit |
 
 The published `catalog.db` is always legacy. Running against a previous output re-applies
@@ -151,11 +154,16 @@ CREATE TABLE Brand (
     Name TEXT NOT NULL UNIQUE            -- normalized brand string
 );
 
+CREATE TABLE Category (
+    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    Name TEXT NOT NULL UNIQUE            -- normalized category string
+);
+
 CREATE TABLE Product (
-    Id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name     TEXT NOT NULL,
-    BrandId  INTEGER REFERENCES Brand (Id),
-    Category TEXT
+    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    Name       TEXT NOT NULL,
+    BrandId    INTEGER REFERENCES Brand (Id),
+    CategoryId INTEGER REFERENCES Category (Id)
 );
 
 CREATE TABLE Seller (
@@ -172,22 +180,33 @@ CREATE TABLE SellerProduct (
 );
 ```
 
-- Rebuild, not in-place `ALTER`: `PRAGMA foreign_keys = OFF`; create staged tables;
-  populate `Brand` from distinct normalized `Product.Brand`; rebuild `Product`
-  preserving `Id`/`Name`/`Category` and mapping `Brand` → `BrandId` (`NULL` when
-  absent); populate `Seller` from distinct `SellerProduct.SellerName`; rebuild
-  `SellerProduct` carrying `SellerProductId` into `ExternalSku` as text; drop the old
-  tables; rename staged tables; `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`;
-  `PRAGMA user_version = 1`.
-- This whole block is skipped when the source is already `user_version = 1`.
-- Brand/seller extraction is not a pure `INSERT ... SELECT` — normalization is a Python
-  function, so distinct values are read, folded in Python, and inserted via Core.
-- The base `SellerProduct` is empty, so its row copy is a no-op, but the steps are
-  written to work with data.
-- `Brand.Name` holds the normalized form; the raw catalog spelling is not preserved
-  (`Brand.DisplayName` is future work).
-- `Product.Id` values are preserved so `AUTOINCREMENT` continues past the current max
-  for new products.
+### Kept / altered / deleted
+
+| Table | Change |
+| --- | --- |
+| `Product` | altered in place: `Id` (values + `sqlite_sequence` preserved) and `Name` kept; `BrandId`, `CategoryId` nullable FKs added; the `Brand` and `Category` text columns dropped after their data is migrated |
+| `SellerProduct` | dropped and recreated: `Id` gone, `SellerName` → `Seller`, `SellerProductId` (INTEGER) → `ExternalSku` (TEXT), `ProductId` kept; new composite PK and `UNIQUE (SellerId, ExternalSku)` |
+| `Brand`, `Category`, `Seller` | created |
+
+### Migration steps (all inside the import transaction, `foreign_keys = OFF`)
+
+Each extraction reads distinct values, folds them with the shared Python normalizer, and
+inserts via SQLAlchemy Core (not a pure `INSERT ... SELECT`).
+
+1. **`Product.Brand` → `Brand`**: `CREATE TABLE Brand`; insert distinct normalized
+   non-empty brands; `ALTER TABLE Product ADD COLUMN BrandId INTEGER REFERENCES Brand (Id)`;
+   `UPDATE Product SET BrandId = <lookup>` (`NULL` when brand null/empty);
+   `ALTER TABLE Product DROP COLUMN Brand`.
+2. **`Product.Category` → `Category`**: same shape, producing `CategoryId` and dropping
+   `Product.Category`.
+3. **`SellerProduct` rebuild** (PK changes → staged table, not `ALTER`): `CREATE TABLE Seller`;
+   insert distinct `SellerName`; `CREATE TABLE SellerProduct_new (...)`; copy rows via the
+   seller-name join, `CAST(SellerProductId AS TEXT)` into `ExternalSku`; drop the old table;
+   rename. Base table empty → the row copy is a no-op but is written to work with data.
+4. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
+
+- Steps 1–4 are skipped entirely when the source is already `user_version = 1`.
+- `Brand.Name` / `Category.Name` hold the normalized form; raw spelling is not preserved.
 - WAL is not used; the published output is a self-contained database written after the
   engine is disposed.
 

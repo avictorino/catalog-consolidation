@@ -31,28 +31,24 @@ atomically, and only after a fully successful run.
 
 ## Database refactor
 
-The given model is compromised — `SellerName` and `Product.Brand` are denormalized
-free text, `SellerProductId` is typed `INTEGER` while the feed sends UUID strings, the
-link table has a pointless surrogate key and no uniqueness constraint. On every run,
-right after download, it is rebuilt (SQLAlchemy Core; no ORM, no Alembic) into:
+The given model is compromised — `SellerName`, `Product.Brand`, and `Product.Category`
+are denormalized free text, `SellerProductId` is typed `INTEGER` while the feed sends
+UUID strings, the link table has a pointless surrogate key and no uniqueness
+constraint. On every run, right after download, it **is really altered** (SQLAlchemy
+Core; no ORM, no Alembic) into:
 
 ```sql
-CREATE TABLE Brand (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE            -- normalized brand string
-);
+CREATE TABLE Brand    (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE);
+CREATE TABLE Category (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE);
 
 CREATE TABLE Product (
-    Id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name     TEXT NOT NULL,
-    BrandId  INTEGER REFERENCES Brand (Id),   -- nullable
-    Category TEXT
+    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    Name       TEXT NOT NULL,
+    BrandId    INTEGER REFERENCES Brand (Id),      -- nullable
+    CategoryId INTEGER REFERENCES Category (Id)    -- nullable
 );
 
-CREATE TABLE Seller (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE
-);
+CREATE TABLE Seller (Id INTEGER PRIMARY KEY AUTOINCREMENT, Name TEXT NOT NULL UNIQUE);
 
 CREATE TABLE SellerProduct (              -- many-to-many link + the seller's own SKU
     SellerId    INTEGER NOT NULL REFERENCES Seller (Id),
@@ -63,10 +59,15 @@ CREATE TABLE SellerProduct (              -- many-to-many link + the seller's ow
 );
 ```
 
-`Brand` is a reference table (a product has 0..1 brands → nullable FK), **not** a
-`BrandProduct` junction. `SellerProduct` stays a junction because a product genuinely
-has many sellers. `Product` keeps its `Id`, `Name`, `Category`; `Brand` string →
-`BrandId`.
+**Kept / altered / deleted:** `Product` is altered in place — `Id` and `Name` kept,
+`BrandId` / `CategoryId` added, the `Brand` and `Category` text columns dropped after a
+**data migration** into the new reference tables. `SellerProduct` is dropped and
+recreated (`SellerName` → `Seller`, `SellerProductId` → `ExternalSku`, surrogate `Id`
+gone). `Brand`, `Category`, `Seller` are new.
+
+`Brand` and `Category` are **reference tables** (a product has 0..1 of each → nullable
+FK), not `BrandProduct` / `CategoryProduct` junctions. `SellerProduct` stays a junction
+because a product genuinely has many sellers.
 
 The refactor is a **conditional migration** guarded by `PRAGMA user_version`: a legacy
 source (the published `catalog.db`) is migrated and stamped `user_version = 1`; a source
@@ -112,19 +113,21 @@ python -m consolidation.cli --matcher rapidfuzz
 ```
 
 Against the currently published sources, both matchers are expected to produce
-**637 brands**, **975 products**, **20 sellers**, **256 seller-product links**, and
-**1 threat**. This is a check, not a guarantee — the remote content may change.
+**637 brands**, **43 categories**, **975 products**, **20 sellers**,
+**256 seller-product links**, and **1 threat**. This is a check, not a guarantee — the
+remote content may change.
 
 ## Key design decisions
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| Database model | rebuild on every run: extract `Brand` (reference) and `Seller` tables; link is `SellerProduct (SellerId, ProductId, ExternalSku)` with a composite key | the given model denormalizes `SellerName` and `Brand` and mistypes the SKU; the challenge allows DB changes |
-| `Brand` as reference, not junction | nullable `Product.BrandId` FK | a product has one brand; a `BrandProduct` junction would allow two |
+| Database model | on every run, migrate the given DB: extract `Brand`, `Category` (reference tables) and `Seller`; link is `SellerProduct (SellerId, ProductId, ExternalSku)` with a composite key | the given model denormalizes `SellerName`, `Brand`, `Category` and mistypes the SKU; the challenge allows DB changes |
+| `Brand` / `Category` as reference, not junction | nullable `Product.BrandId` / `Product.CategoryId` FK + data migration then drop the text column | a product has one brand and one category; a junction would allow two |
 | Keep the seller SKU | `SellerProduct.ExternalSku` (opaque text) + `UNIQUE (SellerId, ExternalSku)` | needed to map a listing back to the seller's catalog; reuse is only across sellers |
-| DB access | SQLAlchemy Core (no ORM, no Alembic) | declarative schema + parameterized statements; a rebuild-every-run tool has no migration history |
-| Product identity | normalized `Name`; brand only as a tie-break gate; `Category` never; feed `Id` never | category disagrees even for true duplicates; `Id` is a seller SKU |
-| Normalization | Python, shared by catalog names, feed names, brands | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
+| DB access | SQLAlchemy Core (no ORM, no Alembic) | declarative schema + parameterized statements; the refactor is one `user_version`-guarded migration, not a revision chain |
+| Conditional migration | run only when the source is legacy (`user_version = 0`); skip an already-migrated DB | idempotent feed writes make incremental re-runs against a previous output safe |
+| Product identity | normalized `Name`; brand only as a tie-break gate; category never; feed `Id` never | category disagrees even for true duplicates; `Id` is a seller SKU |
+| Normalization | Python, shared by catalog / feed names, brands, categories | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
 | Matcher backends | `difflib` vs `rapidfuzz`, same `score()` contract, injected at the CLI edge | clean interchangeability; no DI container |
 | Ambiguous match | skip the row and report it, do not abort the import | one ambiguous row should not hide the outcome of the rest |
@@ -139,8 +142,8 @@ Against the currently published sources, both matchers are expected to produce
   products, the worst case visits about `N × M` records. Indexed candidate reduction
   (FTS5 / trigram) is deliberately out of scope for this iteration.
 - `difflib.SequenceMatcher` can be quadratic in string length.
-- The refactor canonicalizes catalog brand spelling to the normalized form; a
-  human-readable `Brand.DisplayName` is future work.
+- The refactor canonicalizes catalog brand and category spelling to the normalized
+  form; human-readable `DisplayName` columns are future work.
 - The `libinjection` screen may in principle reject a legitimate product whose text
   looks like SQL; every rejection is in the `threat` report for review.
 
