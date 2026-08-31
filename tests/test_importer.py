@@ -35,7 +35,7 @@ def similarity(request: pytest.FixtureRequest) -> Similarity:
 def test_reordered_words_resolve_without_lowering_threshold(
     similarity: Similarity, catalog_name: str, feed_name: str
 ) -> None:
-    expected = CatalogProduct("existing", catalog_name, "Brand", None)
+    expected = CatalogProduct("existing", catalog_name, "Brand")
     entry = ProductEntry(Id="sku", SellerName="seller", Name=feed_name, Brand="BRAND")
 
     product, reason, score = resolve_product(CatalogIndex([expected]), entry, similarity, 1.0)
@@ -59,7 +59,7 @@ def test_reordered_words_resolve_without_lowering_threshold(
 def test_word_order_does_not_ignore_product_attributes(
     similarity: Similarity, catalog_name: str, feed_name: str
 ) -> None:
-    catalog = CatalogIndex([CatalogProduct("existing", catalog_name, "Brand", None)])
+    catalog = CatalogIndex([CatalogProduct("existing", catalog_name, "Brand")])
     entry = ProductEntry(Id="sku", SellerName="seller", Name=feed_name, Brand="Brand")
 
     product, reason, score = resolve_product(catalog, entry, similarity, 0.90)
@@ -87,8 +87,8 @@ def test_word_order_requires_one_brand_compatible_candidate(
 ) -> None:
     catalog = CatalogIndex(
         [
-            CatalogProduct("first", "Smartphone Galaxy S23", first_brand, None),
-            CatalogProduct("second", "Smartphone S23 Galaxy", second_brand, None),
+            CatalogProduct("first", "Smartphone Galaxy S23", first_brand),
+            CatalogProduct("second", "Smartphone S23 Galaxy", second_brand),
         ]
     )
     entry = ProductEntry(
@@ -102,9 +102,9 @@ def test_word_order_requires_one_brand_compatible_candidate(
 
 
 def test_word_order_match_takes_priority_over_fuzzy_candidate(similarity: Similarity) -> None:
-    expected = CatalogProduct("existing", "Smartphone Galaxy S23", "Samsung", None)
+    expected = CatalogProduct("existing", "Smartphone Galaxy S23", "Samsung")
     catalog = CatalogIndex(
-        [expected, CatalogProduct("similar", "Galaxy S23 Smartphones", "Samsung", None)]
+        [expected, CatalogProduct("similar", "Galaxy S23 Smartphones", "Samsung")]
     )
     entry = ProductEntry(
         Id="sku", SellerName="seller", Name="Galaxy S23 Smartphone", Brand="Samsung"
@@ -118,9 +118,9 @@ def test_word_order_match_takes_priority_over_fuzzy_candidate(similarity: Simila
 
 
 def test_exact_name_still_takes_priority_over_word_order(similarity: Similarity) -> None:
-    expected = CatalogProduct("exact", "Galaxy S23 Smartphone", "Samsung", None)
+    expected = CatalogProduct("exact", "Galaxy S23 Smartphone", "Samsung")
     catalog = CatalogIndex(
-        [expected, CatalogProduct("reordered", "Smartphone Galaxy S23", "Samsung", None)]
+        [expected, CatalogProduct("reordered", "Smartphone Galaxy S23", "Samsung")]
     )
     entry = ProductEntry(
         Id="sku", SellerName="seller", Name="Galaxy S23 Smartphone", Brand="Samsung"
@@ -176,7 +176,7 @@ def test_new_product_is_reused_for_reordered_listing(
 
 def test_translation_resolves_with_both_matchers() -> None:
     catalog = CatalogIndex(
-        [CatalogProduct("product-id", "Router WiFi 6 TP-Link", "TP-Link", "Networking")]
+        [CatalogProduct("product-id", "Router WiFi 6 TP-Link", "TP-Link", ("Networking",))]
     )
     entry = ProductEntry.model_validate(
         {
@@ -196,7 +196,7 @@ def test_translation_resolves_with_both_matchers() -> None:
 
 def test_threshold_rejects_boundary_match() -> None:
     catalog = CatalogIndex(
-        [CatalogProduct("product-id", "Router WiFi 6 TP-Link", "TP-Link", "Networking")]
+        [CatalogProduct("product-id", "Router WiFi 6 TP-Link", "TP-Link", ("Networking",))]
     )
     entry = ProductEntry.model_validate(
         {
@@ -244,6 +244,23 @@ def test_importer_persists_links_idempotently(migrated_db: Path, caplog) -> None
                     db_upgrade.SellerProduct.c.ExternalSku
                 )
             ).all() == [("sku-1",)]
+            product_id = conn.scalar(
+                select(db_upgrade.Product.c.Id).where(
+                    db_upgrade.Product.c.Name == "Camera Canon EOS R6"
+                )
+            )
+            category_names = conn.execute(
+                select(db_upgrade.Category.c.Name)
+                .select_from(
+                    db_upgrade.ProductCategory.join(
+                        db_upgrade.Category,
+                        db_upgrade.ProductCategory.c.CategoryId == db_upgrade.Category.c.Id,
+                    )
+                )
+                .where(db_upgrade.ProductCategory.c.ProductId == product_id)
+                .order_by(db_upgrade.Category.c.Name)
+            ).all()
+            assert category_names == [("Photo",), ("Photography",)]
     finally:
         engine.dispose()
 

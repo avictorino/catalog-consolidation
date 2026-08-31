@@ -53,7 +53,7 @@ shape first and rejects an unrecognized schema before Alembic is invoked.
 | Detected source | Classified as | Action |
 | --- | --- | --- |
 | legacy tables present: `Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct` with `SellerName` + `SellerProductId`; no `Brand`/`Category`/`Seller`/`alembic_version` tables | legacy | `alembic upgrade head` runs revision `0001` (the migration steps) and stamps `alembic_version = 0001` |
-| target tables present (`Brand`, `Category`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct` has `ExternalSku`) **and** `alembic_version` at `0001` | already migrated | `alembic upgrade head` is a no-op |
+| target tables present (`Brand`, `Category`, `ProductCategory`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct` has `ExternalSku`) **and** `alembic_version` at `0001` | already migrated | `alembic upgrade head` is a no-op |
 | neither | unrecognized | abort before any write, non-zero exit |
 
 The published `catalog.db` is always legacy. Re-running against a previous output
@@ -74,10 +74,15 @@ CREATE TABLE Category (
 );
 
 CREATE TABLE Product (
-    Id         TEXT PRIMARY KEY,          -- uuid4
-    Name       TEXT NOT NULL,
-    BrandId    TEXT REFERENCES Brand (Id),      -- nullable (119 base rows)
-    CategoryId TEXT REFERENCES Category (Id)    -- nullable (34 base rows)
+    Id      TEXT PRIMARY KEY,             -- uuid4
+    Name    TEXT NOT NULL,
+    BrandId TEXT REFERENCES Brand (Id)    -- nullable (119 base rows)
+);
+
+CREATE TABLE ProductCategory (            -- product taxonomy memberships
+    ProductId  TEXT NOT NULL REFERENCES Product (Id),
+    CategoryId TEXT NOT NULL REFERENCES Category (Id),
+    PRIMARY KEY (ProductId, CategoryId)
 );
 
 CREATE TABLE Seller (
@@ -94,20 +99,57 @@ CREATE TABLE SellerProduct (             -- many-to-many link + the seller's own
 );
 ```
 
-`Brand` and `Category` are reference tables (0..1 per product → nullable FK), not
-`BrandProduct` / `CategoryProduct` junctions. `SellerProduct` is a junction because a
-product genuinely has many sellers.
+`Brand` is a reference table with a nullable 0..1 FK on `Product`. `Category` is a
+reference table connected through `ProductCategory`, allowing a product to belong to
+multiple categories. `SellerProduct` is a junction because a product genuinely has
+many sellers.
 
 #### Target schema diagram
 
-![Target schema](../docs/target-schema.png)
+```mermaid
+erDiagram
+    Brand ||--o{ Product : "has one optional brand"
+    Product ||--o{ ProductCategory : "belongs to"
+    Category ||--o{ ProductCategory : "classifies"
+    Seller ||--o{ SellerProduct : "offers"
+    Product ||--o{ SellerProduct : "is offered"
+
+    Brand {
+        TEXT Id PK
+        TEXT Name UK
+    }
+    Category {
+        TEXT Id PK
+        TEXT Name UK
+    }
+    Product {
+        TEXT Id PK
+        TEXT Name
+        TEXT BrandId FK
+    }
+    ProductCategory {
+        TEXT ProductId PK, FK
+        TEXT CategoryId PK, FK
+    }
+    Seller {
+        TEXT Id PK
+        TEXT Name UK
+    }
+    SellerProduct {
+        TEXT SellerId PK, FK
+        TEXT ProductId PK, FK
+        TEXT ExternalSku UK
+    }
+```
 
 ### Kept / replaced / deleted
 
 - **`Product`** — dropped and recreated. `Name` carried over for all 975 rows; `Id`
-  becomes a fresh `uuid4` (old integer id discarded); `Brand` / `Category` text columns
-  replaced by `BrandId` / `CategoryId` FKs (`NULL` for the 119 brand-less and 34
-  category-less rows).
+  becomes a fresh `uuid4` (old integer id discarded); `Brand` text is replaced by the
+  nullable `BrandId` FK and `Category` text is replaced by `ProductCategory` memberships
+  (119 brand-less rows; 34 products have no category membership).
+- **`ProductCategory`** — created as a product/category junction with a composite
+  primary key; each legacy non-null `Product.Category` becomes one membership.
 - **`SellerProduct`** — dropped and recreated: `Id` removed, `SellerName` → `Seller`,
   `SellerProductId INTEGER` → `ExternalSku TEXT`, `ProductId` becomes a UUID FK; new
   composite PK and `UNIQUE (SellerId, ExternalSku)`.
@@ -125,13 +167,14 @@ sources. Normalization and every `uuid4` are computed in Python, so each extract
 reads distinct values and builds an in-memory map (not a pure `INSERT ... SELECT`).
 
 1. **staging tables**: create `Brand`, `Category`, `Seller`, `Product_new`,
-   `SellerProduct_new`.
+   `ProductCategory_new`, `SellerProduct_new`.
 2. **`Product.Brand` → `Brand`**: `(uuid4(), normalized_name.title())` per distinct
    normalized non-empty brand (**637** rows); keep `{normalized_brand: id}`.
 3. **`Product.Category` → `Category`**: same (**43** rows), with a title-cased persisted
    name; keep `{normalized_category: id}`.
 4. **`Product` rebuild**: fill `Product_new`; per old row `(uuid4(), Name,
-   brand_map.get(...), category_map.get(...))`; keep `{old_int_id: new_uuid}`.
+   brand_map.get(...))`; keep `{old_int_id: new_uuid}` and insert one
+   `ProductCategory_new` membership when the legacy category is non-null.
 5. **`SellerProduct` rebuild**: extract `SellerName` → `Seller` (`(uuid4(), name)` per
    distinct name), then fill `SellerProduct_new` from each old row remapped through the
    seller and product maps, `str(SellerProductId)` → `ExternalSku`. Base table empty →
@@ -202,7 +245,7 @@ Data specifics found here:
 - **Brand spelling**: catalog `BLACK+DECKER` vs `Black+Decker` and `Simplehuman` vs
   `simplehuman` (merge on normalization); feed `"Levi's"` vs catalog `"Levis"`.
 - **Category disagreement**: `Camera Canon EOS R6` — `Photography` in the catalog,
-  `Photo` in the feed → two distinct `Category` rows.
+  `Photo` in the feed → two category memberships for the same product.
 - **SQL injection probe**: the `MegaStore` / `"Security Test Product"` entry has
   `Brand = "TestBrand'; SELECT 1; --"` and one of the malformed `Id`s. `libinjection`
   flags the brand (rejected, `threat`) but does **not** flag `"Levi's"` or `12.9''`.
@@ -212,8 +255,9 @@ Data specifics found here:
 | Table | Rows | Note |
 | --- | --- | --- |
 | `Brand` | **637** | distinct normalized catalog brands; no new brands (the one new-product candidate is a threat) |
-| `Category` | **43** | distinct normalized catalog categories; no new categories |
-| `Product` | **975** | same count, rebuilt with fresh `uuid4` ids; `Brand`/`Category` replaced by `BrandId`/`CategoryId`; 119 rows `BrandId IS NULL`, 34 rows `CategoryId IS NULL` |
+| `Category` | **44** | 43 normalized catalog categories plus the feed-only `Photo` category |
+| `Product` | **975** | same count, rebuilt with fresh `uuid4` ids; `Brand` replaced by `BrandId`; 119 rows `BrandId IS NULL` |
+| `ProductCategory` | **942** | 941 migrated memberships plus the feed-only `Photo` membership; 34 products remain without a category |
 | `Seller` | **20** | distinct feed seller names |
 | `SellerProduct` | **256** | distinct `(SellerId, ProductId)`; 12 feed entries collapse onto an existing pair (11 log `duplicate_listing`), 1 entry is a threat |
 

@@ -60,9 +60,9 @@ Expected result: [`spec/acceptance.md`](spec/acceptance.md).
 > the single source of truth. This section covers only *why*.
 
 The given model is compromised, so when the source is legacy — before any feed processing,
-inside the setup transaction — both given tables are dropped and recreated and three
-reference tables (`Brand`, `Category`, `Seller`) are added, all with `uuid4` `TEXT`
-primary keys. It is a conditional migration keyed on Alembic's `alembic_version` marker
+inside the setup transaction — both given tables are dropped and recreated and the three
+reference tables (`Brand`, `Category`, `Seller`) plus `ProductCategory` are added, all
+with `uuid4` `TEXT` primary keys where applicable. It is a conditional migration keyed on Alembic's `alembic_version` marker
 (a legacy source is migrated by revision `0001`; an already-migrated one leaves
 `alembic upgrade head` a no-op), so the tool can also run incrementally against its own
 output.
@@ -82,11 +82,10 @@ output.
 
 ### Design decisions
 
-- **`Brand` and `Category` are reference tables, not junctions.** A product has 0..1 of
-  each → a nullable FK on `Product`. A `BrandProduct` / `CategoryProduct` junction was
-  rejected: it would permit a product with two brands, and a `UNIQUE(ProductId)` to
-  forbid that just re-creates the FK with extra steps. `SellerProduct` stays a junction
-  because a product genuinely has many sellers.
+- **`Brand` is a reference table and `Category` is a reference table with memberships.**
+  A product has 0..1 brand through nullable `Product.BrandId`, while
+  `ProductCategory(ProductId, CategoryId)` allows multiple category memberships.
+  `SellerProduct` remains a junction because a product genuinely has many sellers.
 - **The seller's own id is kept** as `SellerProduct.ExternalSku` (opaque text, distinct
   from our `Product.Id`), with `UNIQUE (SellerId, ExternalSku)` — needed to map a
   listing back to the seller's catalog.
@@ -102,8 +101,9 @@ output.
   the original raw spelling is not preserved (`DisplayName` later).
 - **`ExternalSku` is the id of the first feed entry that created the link.** A later
   entry for the same resolved product logs `event=duplicate_listing` and is not stored.
-- **`Product.CategoryId` allows `NULL`** even though the feed always carries a category —
-  34 base rows have none, and existing products are never enriched.
+- **`ProductCategory` allows products with no category memberships** — 34 base rows have
+  none. Existing products retain their memberships and can gain a new category when a
+  linked feed entry supplies a category not already associated with the product.
 
 ## Identity model
 
@@ -146,14 +146,14 @@ Outcomes per entry:
 | --- | --- |
 | A field trips the SQL injection screen | reject the entry entirely; log `WARNING`; `threat += 1` |
 | Exactly one product (exact name, same words, or one eligible fuzzy candidate) | `get_or_create` the seller, then `INSERT OR IGNORE` the `(SellerId, ProductId, ExternalSku)` link |
-| No product and no eligible candidate | `get_or_create` the brand and the category, insert a new `Product`, then the link |
+| No product and no eligible candidate | `get_or_create` the brand and category, insert a new `Product`, add its `ProductCategory` membership, then the seller link |
 | Link already present, same or different feed `Id` | no change; if the incoming SKU differs, log `event=duplicate_listing` |
 | Incoming `(SellerId, ExternalSku)` already maps to a different product | skip the entry, record it in the report (no silent re-association) |
 | Two or more eligible candidates, or a brand conflict on an otherwise-matching name | skip the entry, record it in the report, continue |
 
-Existing product attributes (including `BrandId` and `CategoryId`) are never enriched
-or overwritten. A category difference between a linked entry and its product is logged
-at `WARNING`.
+Existing product attributes, including `BrandId`, are never enriched or overwritten. A
+linked entry's category is added to `ProductCategory` when necessary, and a category
+difference is logged at `WARNING`.
 
 ## Ambiguity register (every class occurs in the real data)
 
@@ -164,12 +164,12 @@ at `WARNING`.
 | Inch marks | `12.9"` / `12.9''` / `12.9` ; `55"` / `55` | remove punctuation |
 | Brand spelling in the catalog | `BLACK+DECKER` vs `Black+Decker`; `Simplehuman` vs `simplehuman` | one `Brand` row per normalized name |
 | Brand apostrophe in the feed | feed `"Levi's"` vs catalog `"Levis"` | normalize brand before comparing / before the `Brand` table |
-| Category disagreement | feed `Photo` vs catalog `Photography` | distinct `Category` rows; category is not identity; link the entry to its existing product and log |
+| Category disagreement | feed `Photo` vs catalog `Photography` | distinct category memberships; category is not identity; link the entry to its existing product and log |
 | PT<->EN translation | `"Roteador WiFi 6 TP-Link"` <-> `"Router WiFi 6 TP-Link"` (difflib 0.909) | fuzzy resolves; fragile at the 0.90 cutoff — documented |
 | SQL injection probe | `Brand = "TestBrand'; SELECT 1; --"` | detected by libinjection; entry rejected, counted as `threat` |
 | Invalid / reused feed `Id` | 3 non-UUID, 14 reused across sellers | stored as opaque `ExternalSku`; reuse is across different sellers, so `UNIQUE (SellerId, ExternalSku)` holds; identity still comes from `Name` |
 | Same seller offers the same product twice | `GardenStore` Câmera/Camera, plus 11 more entries | one link; the first entry's SKU is kept, the rest log `duplicate_listing` |
-| Null `Brand` / `Category` | brand: 3 feed / 119 catalog rows; category: 34 catalog rows | `BrandId` / `CategoryId` is `NULL`; absent brand does not block a name match |
+| Null `Brand` / `Category` | brand: 3 feed / 119 catalog rows; category: 34 catalog rows | `BrandId` is `NULL` or `ProductCategory` has no row; absent brand does not block a name match |
 
 ## Matcher layer (parameter injection)
 
@@ -228,8 +228,9 @@ instant). Indexed candidate reduction is out of scope.
 5. Stream `ProductEntry.json` with `requests` + `ijson`; validate each object with
    Pydantic; screen each string field with `libinjection`.
 6. For each surviving entry, open one transaction: resolve the product; when inserting a new product, mint a
-   `uuid4` and `get_or_create` its brand and category; `get_or_create` the seller; link
-   them (idempotent); accumulate `processed`, `new`, `linked`, `skipped`, `threat`.
+   `uuid4` and `get_or_create` its brand and category; add the category membership;
+   `get_or_create` the seller; link them (idempotent); accumulate `processed`, `new`,
+   `linked`, `skipped`, `threat`.
 7. Commit each successful entry immediately; roll back an entry failure, record it, and
    continue with the next entry. Consume the entire document before final publication.
 8. Dispose the engine -> atomically replace the output with the temp file. A published

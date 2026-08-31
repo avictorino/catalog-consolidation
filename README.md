@@ -154,17 +154,18 @@ python -m consolidation.cli --matcher rapidfuzz
 ```
 
 Against the currently published sources, both matchers are expected to produce
-**637 brands**, **43 categories**, **975 products**, **20 sellers**,
-**256 seller-product links**, and **1 threat**. This is a check, not a guarantee — the
-remote content may change.
+**637 brands**, **44 categories**, **975 products**, **20 sellers**,
+**256 seller-product links**, and **1 threat**. The migration starts with 43 catalog
+categories; the feed adds the `Photo` membership/category. This is a check, not a
+guarantee — the remote content may change.
 
 ## Key design decisions
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
-| Database model | on every run, migrate the given DB: extract `Brand`, `Category` (reference tables) and `Seller`; link is `SellerProduct (SellerId, ProductId, ExternalSku)` with a composite key | the given model denormalizes `SellerName`, `Brand`, `Category` and mistypes the SKU; the challenge allows DB changes |
+| Database model | on every run, migrate the given DB: extract `Brand`, `Category` (reference tables) and `Seller`; `Product` has one nullable `BrandId`, `ProductCategory` stores category memberships, and `SellerProduct` stores seller links | the given model denormalizes `SellerName`, `Brand`, `Category` and mistypes the SKU; the challenge allows DB changes |
 | Primary keys | `uuid4` stored as `TEXT`, minted in Python; no `AUTOINCREMENT` | non-enumerable, no DB coordination to mint, stable across environments; accepted cost: larger indexes, worse insert locality |
-| `Brand` / `Category` as reference, not junction | nullable `Product.BrandId` / `Product.CategoryId` FK + data migration then drop the text column | a product has one brand and one category; a junction would allow two |
+| `Brand` / `Category` cardinality | nullable `Product.BrandId` FK for one brand; `ProductCategory (ProductId, CategoryId)` for many categories | brand is singular, while category is taxonomy membership and may contain several values |
 | Keep the seller SKU | `SellerProduct.ExternalSku` (opaque text) + `UNIQUE (SellerId, ExternalSku)` | needed to map a listing back to the seller's catalog; reuse is only across sellers |
 | DB access | SQLAlchemy Core (no ORM) + one Alembic revision | declarative schema + parameterized statements; the refactor runs in a setup transaction; foreign keys are enabled and verified before JSON import |
 | Conditional migration | keyed on `alembic_version`: revision `0001` for a legacy source, no-op for an already-migrated DB | idempotent feed writes make incremental re-runs against a previous output safe |
@@ -183,13 +184,13 @@ remote content may change.
 - Streaming bounds memory but not search cost: for `N` feed entries and `M` catalog
   products, the worst case visits about `N × M` records. Indexed candidate reduction
   (FTS5 / trigram) is deliberately out of scope for this iteration.
-- `difflib.SequenceMatcher` can be quadratic in string length.
 - The refactor canonicalizes catalog brand and category spelling to a title-cased
   normalized form; human-readable `DisplayName` columns are future work.
 - UUID `TEXT` primary keys cost index size and insert locality versus integer keys;
   fine at this volume, but `BLOB(16)` / UUIDv7 would be the move if it mattered.
-- The `libinjection` screen may in principle reject a legitimate product whose text
-  looks like SQL; every rejection is in the `threat` report for review.
+- `libinjection` screening is implemented and every rejection is included in the
+  `threat` report, but it may in principle reject a legitimate product whose text
+  looks like SQL.
 
 ## Future proposal: scalable deduplication
 

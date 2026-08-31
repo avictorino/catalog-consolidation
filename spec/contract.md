@@ -113,10 +113,9 @@ this point.
 | The incoming `(SellerId, ExternalSku)` already maps to a different product | skip the entry, record it (no silent re-association) |
 | Two or more eligible candidates, or a brand conflict on an otherwise-matching name | skip the entry, record it in the report, continue |
 
-- Attributes of existing products (including `BrandId` and `CategoryId`) are never
-  enriched or overwritten.
-- `CategoryId` never affects identity. A category difference between a linked entry and
-  its product is logged at `WARNING` and otherwise ignored.
+- Existing product attributes, including `BrandId`, are never enriched or overwritten.
+- Category never affects identity. A linked entry adds its category to
+  `ProductCategory` when necessary; a category difference is logged at `WARNING`.
 - `ExternalSku` stores the feed `Id` of the entry that first created the link.
 
 ## 4. Persistence
@@ -133,7 +132,8 @@ this point.
 - `SellerProduct` identity is `(SellerId, ProductId)`; `UNIQUE (SellerId, ExternalSku)`
   is also enforced. Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
 - `Brand`, `Category`, and `Seller` rows are created on demand, keyed by their `UNIQUE`
-  `Name` (id = a Python-minted `uuid4`).
+  `Name` (id = a Python-minted `uuid4`). `ProductCategory` rows are created on demand
+  with an idempotent composite `(ProductId, CategoryId)` key.
 - On a global failure (network, JSON parsing, schema validation, database setup), the
   temp database is discarded and the previous output file is left untouched. A feed-item
   persistence failure rolls back only that item, is logged at the end, and later items
