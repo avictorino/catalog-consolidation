@@ -24,8 +24,8 @@ from sqlalchemy.engine import Connection, Engine
 from consolidation import schema
 from consolidation.feed import ProductEntry, Report, screen_entry
 from consolidation.resolver import CatalogIndex, CatalogProduct, resolve_product
+from consolidation.schema import normalize
 from consolidation.similarity import Similarity, build_similarity
-from consolidation.util import normalize
 
 logger = logging.getLogger("consolidation")
 

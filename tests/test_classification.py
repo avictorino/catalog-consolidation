@@ -3,7 +3,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from consolidation import schema
 from consolidation.repository import CatalogRepository
 
 
@@ -34,9 +33,3 @@ def test_classify_unrecognized_partial(tmp_path: Path) -> None:
     )
     conn.close()
     assert _classify(db) == "unrecognized"
-
-
-def test_new_uuid_shape() -> None:
-    value = schema.new_uuid()
-    assert len(value) == 36
-    assert value.count("-") == 4

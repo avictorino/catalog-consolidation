@@ -74,7 +74,6 @@ def _stub_io(monkeypatch: pytest.MonkeyPatch):
         return tmp
 
     monkeypatch.setattr(pipeline, "download_to", fake_download_to)
-    monkeypatch.setattr(pipeline, "verify_sqlite_header", lambda _path: None)
     monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter([ENTRY, ENTRY, ENTRY]))
 
 

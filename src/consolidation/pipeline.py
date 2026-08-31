@@ -8,7 +8,7 @@ from pathlib import Path
 
 from consolidation.feed import FeedValidationError, Report, iter_feed
 from consolidation.repository import Catalog, CatalogRepository
-from consolidation.util import download_to, verify_sqlite_header
+from consolidation.resolver import download_to
 
 logger = logging.getLogger("consolidation")
 
@@ -74,7 +74,6 @@ def run(
     report: Report | None = None
     try:
         tmp = download_to(catalog_url, output.parent)
-        verify_sqlite_header(tmp)
 
         with repository_factory(tmp) as repo:
             if repo.classify_source() == "unrecognized":

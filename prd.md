@@ -218,8 +218,9 @@ instant). Indexed candidate reduction is out of scope.
 
 1. Resolve and validate configuration (CLI plus `.env` next to the entry point).
 2. Download `catalog.db` in chunks to a temp file in the output directory (fresh every run).
-3. Verify the SQLite header; check the table shape and the presence of `alembic_version`
-   to classify the source as legacy, already-migrated, or unrecognized (abort on the last).
+3. Check the table shape and the presence of `alembic_version` to classify the source
+   as legacy, already-migrated, or unrecognized (abort on the last — this also catches a
+   downloaded file that is not a usable SQLite catalog).
 4. Open a SQLAlchemy engine on the temp file, begin the setup transaction; run
    `alembic upgrade head` with that connection injected — revision `0001` performs the
    full [database refactor](spec/data-profile.md#refactored-database) for a legacy

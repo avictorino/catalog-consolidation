@@ -1,18 +1,56 @@
-"""Identity resolution: match one validated feed entry to at most one catalog product.
+"""Catalog acquisition and identity resolution.
 
-Pure in-memory logic — no database access. The exact / word-order / fuzzy stages are
-specified in ``spec/contract.md#matching-stages``. ``consolidation.repository`` loads the
-catalog into ``CatalogIndex`` and persists the outcome.
+``download_to`` streams the base catalog to a temp file. The rest is pure in-memory
+matching logic — no database access: the exact / word-order / fuzzy stages specified in
+``spec/contract.md#matching-stages``. ``consolidation.repository`` loads the catalog into
+``CatalogIndex`` and persists the outcome.
 """
 
 from __future__ import annotations
 
+import logging
+import uuid
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
+
+import requests
 
 from consolidation.feed import ProductEntry
+from consolidation.schema import normalize
 from consolidation.similarity import Similarity
-from consolidation.util import normalize
+
+logger = logging.getLogger("consolidation")
+
+_CHUNK = 1 << 16  # 64 KiB
+_TIMEOUT = (10, 60)  # (connect, read) seconds
+
+
+def download_to(url: str, dest_dir: Path) -> Path:
+    """Stream ``url`` in chunks into a fresh temp file inside ``dest_dir``.
+
+    The response body is never held whole in memory (no ``response.content`` /
+    ``response.json()``). Returns the path of the downloaded temp file.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    tmp = dest_dir / f".catalog-{uuid.uuid4().hex}.db.tmp"
+    logger.info("downloading catalog url=%s dest=%s", url, tmp)
+
+    bytes_written = 0
+    try:
+        with requests.get(url, stream=True, timeout=_TIMEOUT) as response:
+            response.raise_for_status()
+            with tmp.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=_CHUNK):
+                    if chunk:
+                        handle.write(chunk)
+                        bytes_written += len(chunk)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    logger.info("download complete bytes=%d", bytes_written)
+    return tmp
 
 
 @dataclass

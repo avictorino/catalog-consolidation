@@ -27,8 +27,7 @@ from alembic import op
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
 
-from consolidation.schema import new_uuid
-from consolidation.util import normalize
+from consolidation.schema import new_uuid, normalize
 
 revision: str = "0001"
 down_revision: str | None = None
