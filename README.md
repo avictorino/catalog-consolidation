@@ -191,28 +191,18 @@ remote content may change.
 - The `libinjection` screen may in principle reject a legitimate product whose text
   looks like SQL; every rejection is in the `threat` report for review.
 
-## Future proposal: deduplication with scikit-learn
+## Future proposal: scalable deduplication
 
-For a catalog substantially larger than the challenge dataset, a future implementation
-could use `scikit-learn` to reduce the number of fuzzy comparisons. This is a proposal,
-not part of the current runtime or acceptance contract, and should not replace the
-deterministic matching stages.
+For larger catalogs, a future version could use `scikit-learn` to retrieve a small set of
+candidates with TF-IDF and cosine similarity, optionally followed by a trained
+`dedupe.Gazetteer` model.
 
-1. Normalize product names with the existing shared function and preserve model,
-   capacity, and other numeric tokens.
-2. Build a sparse character- or word-ngram representation with
-   `TfidfVectorizer` (or `HashingVectorizer` when incremental updates are required).
-3. Retrieve the top `k` catalog candidates with cosine distance using
-   `NearestNeighbors` or a sparse cosine-similarity search.
-4. Apply the existing brand, token-count, numeric-token, threshold, and ambiguity gates
-   to those candidates before creating a link.
-5. Keep exact-name and word-multiset matching ahead of the model, and send low-margin
-   or conflicting results for review instead of forcing a deduplication decision.
+Exact matching, word-multiset matching, brand/model validation, numeric-token checks, and
+ambiguity handling must remain the first layer. This could reduce the current full catalog
+scan, but would introduce new dependencies, model and index management, labeled training
+data, threshold calibration, and precision/recall evaluation.
 
-This approach can reduce fuzzy work from a full catalog scan to a small candidate set,
-but it introduces a model/index lifecycle, a new dependency, memory considerations, and
-the need for precision/recall evaluation. A production version should benchmark it with
-real catalog changes and seller naming patterns before changing the default behavior.
+This is not part of the current implementation; `RapidFuzz` remains the default matcher.
 
 Not presented as a high-performance design for very large catalogs; it targets
 incremental consumption at the challenge's volume.
