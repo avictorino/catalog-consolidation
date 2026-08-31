@@ -112,6 +112,12 @@ def run(
                     trans.commit()
                     logger.info("schema refactor committed")
 
+                    conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+                    if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+                        raise RuntimeError("foreign key enforcement could not be enabled")
+                    conn.commit()
+                    logger.info("foreign key enforcement enabled")
+
                     similarity = build_similarity(matcher)
                     importer = _refresh_importer(conn, similarity, threshold)
                     report = Report()

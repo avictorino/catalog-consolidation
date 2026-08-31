@@ -20,13 +20,16 @@ Working rules for AI assistance on this repository.
 - **DB refactor**: implement exactly as `spec/data-profile.md#refactored-database`
   specifies — do not restate the schema or the steps elsewhere. SQLAlchemy Core for the
   schema and statements (no ORM); the refactor is a single Alembic revision (`0001`)
-  driven programmatically with an injected connection, so it runs inside the single
-  import transaction. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
+  driven programmatically with an injected connection, so it runs inside the setup
+  transaction. `uuid4` `TEXT` primary keys, no `AUTOINCREMENT`. Conditional on
   Alembic's `alembic_version` marker (legacy source migrated, already-migrated source
   left alone, unrecognized schema aborts).
 - Commit the schema refactor before feed processing, then use one transaction per feed
   entry. A failed entry is rolled back in isolation, recorded in the final report, and
   does not prevent later entries from being attempted. All feed writes are idempotent.
+- Foreign keys may remain disabled during the schema rebuild only. After its commit,
+  enable and verify enforcement on the import connection before consuming the JSON,
+  including when the source is already migrated. Abort if enforcement is unavailable.
 - `Brand` / `Category` are reference tables (nullable FK), not junctions.
   `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.
 - Stream the feed: no `response.json()`, `response.content`, `list(iterator)`, or a

@@ -25,7 +25,7 @@ the database.
 | Similarity | `difflib` (stdlib) / `rapidfuzz` | interchangeable `score()` backends |
 | SQL injection screen | `libinjection` (`libinjection-python`) | WAF-grade tokenizer (ModSecurity uses libinjection); wrapper is GPLv3, core is BSD-3, no cp311/cp312 wheel |
 | Database access + schema | **SQLAlchemy Core 2.x** | declarative target schema, parameterized statements, `insert()` for the refactor |
-| Schema refactor | **Alembic 1.14** (single revision `0001`) | one hand-written migration, driven programmatically with an injected connection so it shares the import transaction; `alembic_version` is the legacy/migrated marker |
+| Schema refactor | **Alembic 1.14** (single revision `0001`) | one hand-written migration, driven programmatically with an injected connection inside the setup transaction; `alembic_version` is the legacy/migrated marker |
 | Primary keys | **UUID (`uuid4`) as `TEXT`**, generated in Python | non-enumerable, generated without DB coordination, stable across environments; no `AUTOINCREMENT` anywhere |
 | Config | `python-dotenv` | every CLI option has a default in `.env` |
 
@@ -38,7 +38,7 @@ and Alembic's revision-chain / autogenerate / offline (`--sql`) machinery. The r
 is a single [conditional migration](spec/data-profile.md#conditional-migration): one
 hand-written Alembic revision (`0001`), run programmatically from
 `consolidation.pipeline` with the live connection injected via
-`config.attributes["connection"]` so it executes inside the single import transaction.
+`config.attributes["connection"]` so it executes inside the setup transaction.
 Alembic's `alembic_version` table replaces a `PRAGMA user_version` guard as the
 legacy/already-migrated marker.
 
@@ -59,8 +59,8 @@ Expected result: [`spec/acceptance.md`](spec/acceptance.md).
 > [`spec/data-profile.md#refactored-database`](spec/data-profile.md#refactored-database)** —
 > the single source of truth. This section covers only *why*.
 
-The given model is compromised, so on every run — before any feed processing, inside
-the single import transaction — both given tables are dropped and recreated and three
+The given model is compromised, so when the source is legacy — before any feed processing,
+inside the setup transaction — both given tables are dropped and recreated and three
 reference tables (`Brand`, `Category`, `Seller`) are added, all with `uuid4` `TEXT`
 primary keys. It is a conditional migration keyed on Alembic's `alembic_version` marker
 (a legacy source is migrated by revision `0001`; an already-migrated one leaves
@@ -119,6 +119,7 @@ schema validation (pydantic)
   -> SQL injection screen (libinjection)  -- reject -> threat
   -> normalize (shared)
   -> exact lookup by normalized name (shared)
+  -> exact normalized token multiset, ignoring word order (shared)
   -> gated fuzzy scan scored by Similarity (injected; difflib | rapidfuzz)
   -> identity policy + threshold (shared)
   -> outcome: link | insert + link | skip and report
@@ -128,15 +129,23 @@ Normalization (one function; catalog names, feed names, brands, categories): low
 strip accents (NFKD), collapse whitespace, remove punctuation and quote marks, keep
 digits. SQLite `lower()` is ASCII-only, so this is done in Python.
 
-Fuzzy gate (only when the exact lookup misses): brands equal after normalization when
-both are present, same word count, same numeric tokens, `score >= threshold`.
+When exact-name lookup misses, compare normalized word multisets: order may differ,
+but word counts, repetitions and model/capacity tokens must remain identical. Link
+only a unique brand-compatible candidate; otherwise report ambiguity or a brand
+conflict. This rule is independent of the matcher and its threshold. It assumes word
+order alone does not change identity; directional names may need domain-specific
+handling beyond this policy.
+
+Fuzzy gate (only when both exact-name and word-multiset lookup miss): brands equal
+after normalization when both are present, same word count, same numeric tokens,
+`score >= threshold`.
 
 Outcomes per entry:
 
 | Situation | Action |
 | --- | --- |
 | A field trips the SQL injection screen | reject the entry entirely; log `WARNING`; `threat += 1` |
-| Exactly one product (exact match or one eligible fuzzy candidate) | `get_or_create` the seller, then `INSERT OR IGNORE` the `(SellerId, ProductId, ExternalSku)` link |
+| Exactly one product (exact name, same words, or one eligible fuzzy candidate) | `get_or_create` the seller, then `INSERT OR IGNORE` the `(SellerId, ProductId, ExternalSku)` link |
 | No product and no eligible candidate | `get_or_create` the brand and the category, insert a new `Product`, then the link |
 | Link already present, same or different feed `Id` | no change; if the incoming SKU differs, log `event=duplicate_listing` |
 | Incoming `(SellerId, ExternalSku)` already maps to a different product | skip the entry, record it in the report (no silent re-association) |
@@ -211,10 +220,11 @@ instant). Indexed candidate reduction is out of scope.
 2. Download `catalog.db` in chunks to a temp file in the output directory (fresh every run).
 3. Verify the SQLite header; check the table shape and the presence of `alembic_version`
    to classify the source as legacy, already-migrated, or unrecognized (abort on the last).
-4. Open a SQLAlchemy engine on the temp file, begin **one** transaction; run
+4. Open a SQLAlchemy engine on the temp file, begin the setup transaction; run
    `alembic upgrade head` with that connection injected — revision `0001` performs the
    full [database refactor](spec/data-profile.md#refactored-database) for a legacy
-   source and is a no-op for an already-migrated one.
+   source and is a no-op for an already-migrated one. Commit, enable foreign keys on
+   that connection, and verify enforcement before consuming any JSON; abort if unavailable.
 5. Stream `ProductEntry.json` with `requests` + `ijson`; validate each object with
    Pydantic; screen each string field with `libinjection`.
 6. For each surviving entry, open one transaction: resolve the product; when inserting a new product, mint a

@@ -40,8 +40,8 @@ Before any feed processing, the downloaded copy is refactored — both given tab
 dropped and recreated, three reference tables (`Brand`, `Category`, `Seller`) added.
 The schema and every statement use SQLAlchemy Core (declarative `Table` metadata + DDL
 + `insert()`; no ORM); the refactor itself is a single Alembic revision (`0001`) run
-programmatically with the import connection injected, so it executes inside the single
-import transaction. Every primary key is a `uuid4` stored as `TEXT`, minted in Python;
+programmatically with the import connection injected, so it executes inside the setup
+transaction. Every primary key is a `uuid4` stored as `TEXT`, minted in Python;
 no `AUTOINCREMENT`.
 
 ### Conditional migration
@@ -117,10 +117,11 @@ product genuinely has many sellers.
 
 Revision `0001` (`migrations/versions/0001_refactor_catalog.py`) delegates to the
 helpers in `consolidation.db_upgrade`. Staged tables are built alongside the originals
-then swapped in. FK enforcement is not toggled — SQLite's `PRAGMA foreign_keys` is a
-no-op inside a transaction and the whole refactor runs in one — so SQLAlchemy's default
-(FK enforcement off) stands during the rebuild and `PRAGMA foreign_key_check` validates
-at the end. Normalization and every `uuid4` are computed in Python, so each extraction
+then swapped in. FK enforcement remains off during the rebuild because SQLite's
+`PRAGMA foreign_keys` is a no-op inside a transaction; `PRAGMA foreign_key_check`
+validates the result at the end. After the setup commits, the pipeline enables and
+verifies FK enforcement before consuming the feed, including for already-migrated
+sources. Normalization and every `uuid4` are computed in Python, so each extraction
 reads distinct values and builds an in-memory map (not a pure `INSERT ... SELECT`).
 
 1. **staging tables**: create `Brand`, `Category`, `Seller`, `Product_new`,
@@ -169,12 +170,13 @@ output is a self-contained database written after the engine is disposed.
 
 ## Match outcomes (with the shipped rules)
 
-Screening → normalization → exact lookup → gated fuzzy.
+Screening → normalization → exact name → same word multiset → gated fuzzy.
 
 | Outcome | Count |
 | --- | --- |
 | Rejected by the SQL injection screen (`threat`) | 1 |
 | Resolves to exactly one catalog product (exact normalized name) | 266 |
+| Resolves by the same normalized words in a different order | 0 |
 | Resolves via one gated fuzzy candidate | 2 |
 | No match, new product | 0 (the only candidate is the threat) |
 | Ambiguous / brand conflict (`skipped`) | 0 |

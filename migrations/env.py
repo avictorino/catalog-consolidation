@@ -2,7 +2,7 @@
 
 The consolidation tool always runs migrations *online* with a connection injected by
 :mod:`consolidation.pipeline` via ``config.attributes["connection"]`` — so the refactor
-executes inside the application's single import transaction. Offline (``--sql``) mode
+executes inside the application's setup transaction. Offline (``--sql``) mode
 and autogenerate are not used.
 """
 

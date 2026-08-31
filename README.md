@@ -98,9 +98,9 @@ remote content may change.
 | Primary keys | `uuid4` stored as `TEXT`, minted in Python; no `AUTOINCREMENT` | non-enumerable, no DB coordination to mint, stable across environments; accepted cost: larger indexes, worse insert locality |
 | `Brand` / `Category` as reference, not junction | nullable `Product.BrandId` / `Product.CategoryId` FK + data migration then drop the text column | a product has one brand and one category; a junction would allow two |
 | Keep the seller SKU | `SellerProduct.ExternalSku` (opaque text) + `UNIQUE (SellerId, ExternalSku)` | needed to map a listing back to the seller's catalog; reuse is only across sellers |
-| DB access | SQLAlchemy Core (no ORM) + one Alembic revision | declarative schema + parameterized statements; the refactor is a single hand-written revision run inside the import transaction, not a revision chain |
+| DB access | SQLAlchemy Core (no ORM) + one Alembic revision | declarative schema + parameterized statements; the refactor runs in a setup transaction; foreign keys are enabled and verified before JSON import |
 | Conditional migration | keyed on `alembic_version`: revision `0001` for a legacy source, no-op for an already-migrated DB | idempotent feed writes make incremental re-runs against a previous output safe |
-| Product identity | normalized `Name`; brand only as a tie-break gate; category never; feed `Id` never | category disagrees even for true duplicates; `Id` is a seller SKU |
+| Product identity | normalized `Name`, then identical word multisets regardless of order, then gated fuzzy matching; brand compatibility required; category and feed `Id` never define identity | preserve repeated words and model/capacity tokens; skip ambiguous matches; `Id` is a seller SKU |
 | Normalization | Python, shared by catalog / feed names, brands, categories | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
 | Matcher backends | `difflib` vs `rapidfuzz`, same `score()` contract, injected at the CLI edge | clean interchangeability; no DI container |

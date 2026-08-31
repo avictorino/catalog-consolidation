@@ -6,6 +6,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from sqlalchemy import update
+from sqlalchemy.engine import Connection
 
 from consolidation import db_upgrade, pipeline
 from consolidation.feed import ProductEntry
@@ -254,6 +256,127 @@ def test_pipeline_isolates_item_failure_and_logs_it(
         "record=1" in record.message and "injected item failure" in record.message
         for record in caplog.records
     )
+
+
+@pytest.mark.parametrize("already_migrated", [False, True], ids=["legacy", "migrated"])
+@pytest.mark.parametrize(
+    ("table_name", "column"),
+    [
+        ("Product", "BrandId"),
+        ("Product", "CategoryId"),
+        ("SellerProduct", "SellerId"),
+        ("SellerProduct", "ProductId"),
+    ],
+)
+def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
+    _stub_download: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    already_migrated: bool,
+    table_name: str,
+    column: str,
+) -> None:
+    if already_migrated:
+        apply_refactor(_stub_download)
+    entries = [
+        ProductEntry(
+            Id="sku-camera",
+            SellerName="FirstSeller",
+            Name="Camera Canon EOS R6",
+            Brand="Canon",
+            Category="Photography",
+        ),
+        ProductEntry(
+            Id="sku-failed",
+            SellerName="FailedSeller",
+            Name="Test Mixer 1001",
+            Brand="New Brand",
+            Category="New Category",
+        ),
+        ProductEntry(
+            Id="sku-recovered",
+            SellerName="RecoveredSeller",
+            Name="Test Speaker 2002",
+            Brand="New Brand",
+            Category="New Category",
+        ),
+    ]
+    original_process = pipeline.FeedImporter.process
+    enforcement = []
+
+    def violate_one_item(self, entry, record_index, report) -> None:
+        enforcement.append(self.conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
+        original_process(self, entry, record_index, report)
+        if record_index == 1:
+            table = db_upgrade.metadata.tables[table_name]
+            where = (
+                table.c.Name == entry.Name
+                if table_name == "Product"
+                else table.c.ExternalSku == entry.Id
+            )
+            # Fail after all item writes, exercising real SQLite enforcement and rollback.
+            self.conn.execute(update(table).where(where).values({column: db_upgrade.new_uuid()}))
+
+    monkeypatch.setattr(pipeline, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(pipeline.FeedImporter, "process", violate_one_item)
+    output = tmp_path / "catalog_output.db"
+
+    with caplog.at_level(logging.INFO, logger="consolidation"):
+        result = pipeline.run(**_config(output))
+
+    assert result == 1
+    assert enforcement == [1, 1, 1]
+    assert _count(output, "Product") == PRODUCT_ROWS + 1
+    assert _count(output, "Brand") == BRAND_ROWS + 1
+    assert _count(output, "Category") == CATEGORY_ROWS + 1
+    assert _count(output, "Seller") == 2
+    assert _count(output, "SellerProduct") == 2
+    assert _rows(output, "SELECT Name FROM Product WHERE Name = 'Test Mixer 1001'") == []
+    assert _rows(output, "SELECT Name FROM Seller ORDER BY Name") == [
+        ("FirstSeller",),
+        ("RecoveredSeller",),
+    ]
+    assert _rows(output, "PRAGMA foreign_key_check") == []
+    assert "processed=3 new=1 linked=2 skipped=0 threat=0 failed=1" in caplog.text
+    assert "feed item failures count=1" in caplog.text
+    assert any(
+        "record=1" in record.message
+        and "IntegrityError" in record.message
+        and "FOREIGN KEY constraint failed" in record.message
+        for record in caplog.records
+    )
+
+
+def test_pipeline_aborts_before_feed_if_foreign_keys_cannot_be_enabled(
+    _stub_download: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    output = tmp_path / "catalog_output.db"
+    output.write_bytes(b"previous output")
+    original_exec = Connection.exec_driver_sql
+    feed_requested = False
+
+    def ignore_enabling(self, statement, *args, **kwargs):
+        if statement == "PRAGMA foreign_keys = ON":
+            statement = "PRAGMA foreign_keys"
+        return original_exec(self, statement, *args, **kwargs)
+
+    def unexpected_feed(_url):
+        nonlocal feed_requested
+        feed_requested = True
+        return iter(())
+
+    monkeypatch.setattr(Connection, "exec_driver_sql", ignore_enabling)
+    monkeypatch.setattr(pipeline, "iter_feed", unexpected_feed)
+
+    assert pipeline.run(**_config(output)) == 1
+    assert not feed_requested
+    assert "foreign key enforcement could not be enabled" in caplog.text
+    assert output.read_bytes() == b"previous output"
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_pipeline_rollback_preserves_previous_output(

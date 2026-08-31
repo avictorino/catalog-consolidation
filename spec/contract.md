@@ -89,8 +89,15 @@ this point.
 
 1. **Exact**: look up the normalized feed name in the normalized-name index of the
    catalog. Catalog names are unique after normalization, so this yields 0 or 1.
-2. **Fuzzy** (only if stage 1 misses): scan the catalog, score each product with the
-   selected `Similarity`, and keep those that pass the gate:
+2. **Same words, different order** (only if stage 1 misses): compare the non-empty
+   multisets of normalized name tokens, preserving repeated words and numeric/model
+   tokens. Filter matches by brand compatibility (equal when both are present).
+   Exactly one compatible candidate is linked without a similarity score or threshold.
+   Multiple compatible candidates are skipped as ambiguous; if all word matches have
+   conflicting brands, skip the entry as a brand conflict. These outcomes are final;
+   do not fall back to fuzzy matching for an ambiguity or a brand conflict.
+3. **Fuzzy** (only if neither earlier stage finds a name match): scan the catalog,
+   score each product with the selected `Similarity`, and keep those that pass the gate:
    - both brands, after normalization, are equal — when both are present;
    - same number of whitespace-separated tokens;
    - the multiset of tokens that contain a digit is equal;
@@ -100,7 +107,7 @@ this point.
 
 | Situation | Action |
 | --- | --- |
-| Exactly one product (exact match or one eligible fuzzy candidate) | `get_or_create` the seller, then `INSERT OR IGNORE` the `(SellerId, ProductId, ExternalSku)` link |
+| Exactly one product (exact name, same words, or one eligible fuzzy candidate) | `get_or_create` the seller, then `INSERT OR IGNORE` the `(SellerId, ProductId, ExternalSku)` link |
 | No product and no eligible candidate | `get_or_create` the brand and the category, insert a new `Product`, then the link |
 | The `(SellerId, ProductId)` link already exists | no change; if the incoming `ExternalSku` differs from the stored one, log `event=duplicate_listing` |
 | The incoming `(SellerId, ExternalSku)` already maps to a different product | skip the entry, record it (no silent re-association) |
@@ -141,7 +148,7 @@ breakdown, and the migration steps are defined in
 [`data-profile.md#refactored-database`](data-profile.md#refactored-database). Normative
 requirements on top of that:
 
-- The refactor runs **inside the single import transaction** (§4), before the first
+- The refactor runs **inside the setup transaction** (§4), before the first
   feed entry is processed — Alembic is invoked with that connection injected.
 - It is **conditional**: `classify_source` rejects an unrecognized schema before any
   write with a non-zero exit; otherwise `alembic upgrade head` runs — revision `0001`
@@ -151,6 +158,11 @@ requirements on top of that:
 - FK enforcement stays off during the rebuild (SQLite makes `PRAGMA foreign_keys` a
   no-op inside a transaction); `PRAGMA foreign_key_check` must be empty and
   `alembic_version` must read `0001` before feed processing begins.
+- After the setup transaction commits, enable `PRAGMA foreign_keys = ON` on the
+  import connection and verify that it reads `1` before consuming the JSON. Apply
+  this to already-migrated sources too; fail before feed processing/publication if
+  enforcement cannot be enabled. Keep it enabled throughout all item transactions,
+  including after rollbacks. A foreign key violation is an item persistence failure.
 - WAL is not used; the published output is self-contained, written after the engine is
   disposed.
 - No Alembic offline (`--sql`) mode and no autogenerate; the single revision is

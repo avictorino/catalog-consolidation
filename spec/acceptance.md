@@ -48,6 +48,9 @@ Verify:
   logically identical tables and reports 0 `new`.
 - The schema refactor is committed before feed processing; each feed item has its own
   transaction and a failed item rolls back without removing successful item changes.
+- `PRAGMA foreign_keys` reads `1` during feed processing for both legacy and
+  already-migrated sources. If enforcement cannot be enabled, no feed is consumed
+  and no output is published.
 - Exactly one Alembic revision exists (`0001`) and it is the head; env.py refuses
   offline mode and requires an injected connection.
 
@@ -65,11 +68,20 @@ Verify:
 - An invalid JSON record still aborts the stream safely; a persistence failure after
   several committed items rolls back only that item, later items continue, the partial
   result is published, and the failed record is logged at the end.
+- An invalid `BrandId`, `CategoryId`, `SellerId`, or `ProductId` is rejected by SQLite.
+  All earlier writes for that item are rolled back, subsequent items still run with
+  FK enforcement enabled, and the violation appears in the final failure log.
 - `[]` as the feed is valid and produces the refactored base catalog with no links.
 
 ### Identity
 
 - Exact duplicate (whitespace / accent / punctuation variant) → link only, no new product.
+- Reordered words (`Smartphone Galaxy S23` / `Galaxy S23 Smartphone`) with a unique
+  brand-compatible candidate → link only with either matcher, even at threshold `1.0`.
+- Word-order matching preserves repeated words and does not ignore extra words such
+  as `Ultra` or `Kit`, or changed model/capacity tokens.
+- Multiple brand-compatible word-order candidates → skip and report ambiguity;
+  only conflicting brands → skip and report a brand conflict.
 - PT→EN translation variant within the fuzzy gate → link only.
 - Missing brand on one side → still matches on name.
 - Category difference between entry and product → link, `WARNING` logged.
