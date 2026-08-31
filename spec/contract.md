@@ -76,11 +76,14 @@ category values:
 
 1. Unicode NFKD, drop combining marks (accent folding).
 2. Lowercase.
-3. Replace every run of non-alphanumeric characters with a single space.
-4. Collapse whitespace, trim.
+3. Remove quote and apostrophe marks with no replacement (straight `'` `` ` `` `"`,
+   curly single/double, prime / double-prime, acute, modifier apostrophe).
+4. Replace every run of remaining non-alphanumeric characters with a single space.
+5. Collapse whitespace, trim.
 
-Digits and decimal separators inside numbers are preserved (step 3 keeps `12.9` as
-`12 9`, which is stable across `12.9"`, `12.9''`, `12.9`).
+Digits and decimal separators inside numbers become separate tokens (step 4 keeps
+`12.9` as `12 9`, stable across `12.9"`, `12.9''`, `12.9`). Step 3 is what makes feed
+`Levi's` normalize to `levis` and match catalog `Levis`.
 
 ### Matching stages
 
@@ -115,9 +118,12 @@ this point.
 ## 4. Persistence
 
 - Database access is through **SQLAlchemy Core** (declarative `Table` metadata,
-  `insert()` / `select()` / `insert().from_select()`). No ORM, no Alembic.
+  `insert()` / `select()` / `insert().from_select()`). No ORM. The schema refactor is a
+  single Alembic revision (`0001`); no revision chain, no autogenerate, no offline mode.
 - One transaction per import — covering the schema refactor and all feed processing.
-  **Not** one transaction per entry.
+  **Not** one transaction per entry. Alembic runs with the import connection injected
+  (`config.attributes["connection"]`) so revision `0001` executes inside that same
+  transaction.
 - All statements that carry external data are parameterized (Core does this by construction).
 - `SellerProduct` identity is `(SellerId, ProductId)`; `UNIQUE (SellerId, ExternalSku)`
   is also enforced. Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
@@ -129,21 +135,25 @@ this point.
 
 ## 5. Schema refactor (on the downloaded copy, before feed processing)
 
-The full target schema, the `PRAGMA user_version` guard, the kept/replaced/deleted
+The full target schema, the `alembic_version` guard, the kept/replaced/deleted
 breakdown, and the migration steps are defined in
 [`data-profile.md#refactored-database`](data-profile.md#refactored-database). Normative
 requirements on top of that:
 
 - The refactor runs **inside the single import transaction** (§4), before the first
-  feed entry is processed.
-- It is **conditional**: a legacy source is migrated; an already-migrated source
-  (`user_version = 1`) is untouched; an unrecognized schema aborts before any write
-  with a non-zero exit.
-- Every primary key is a Python-minted `uuid4` `TEXT`; there is no `AUTOINCREMENT`.
-- Foreign keys are disabled for the rebuild and re-enabled after; `PRAGMA foreign_key_check`
-  must pass and `user_version` must read `1` before feed processing begins.
+  feed entry is processed — Alembic is invoked with that connection injected.
+- It is **conditional**: `classify_source` rejects an unrecognized schema before any
+  write with a non-zero exit; otherwise `alembic upgrade head` runs — revision `0001`
+  for a legacy source, a no-op for a source already at `0001`.
+- Every primary key is a Python-minted `uuid4` `TEXT`; there is no `AUTOINCREMENT`, and
+  `sqlite_sequence` carries no counters after the refactor.
+- FK enforcement stays off during the rebuild (SQLite makes `PRAGMA foreign_keys` a
+  no-op inside a transaction); `PRAGMA foreign_key_check` must be empty and
+  `alembic_version` must read `0001` before feed processing begins.
 - WAL is not used; the published output is self-contained, written after the engine is
   disposed.
+- No Alembic offline (`--sql`) mode and no autogenerate; the single revision is
+  hand-written.
 
 ## 6. Matcher interface
 

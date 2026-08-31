@@ -37,24 +37,27 @@ restating it.
 ## Refactored database
 
 Before any feed processing, the downloaded copy is refactored — both given tables
-dropped and recreated, three reference tables (`Brand`, `Category`, `Seller`) added —
-via SQLAlchemy Core (declarative `Table` metadata + DDL + `insert()`; no ORM, no
-Alembic), inside the single import transaction. Every primary key is a `uuid4` stored
-as `TEXT`, minted in Python; no `AUTOINCREMENT`.
+dropped and recreated, three reference tables (`Brand`, `Category`, `Seller`) added.
+The schema and every statement use SQLAlchemy Core (declarative `Table` metadata + DDL
++ `insert()`; no ORM); the refactor itself is a single Alembic revision (`0001`) run
+programmatically with the import connection injected, so it executes inside the single
+import transaction. Every primary key is a `uuid4` stored as `TEXT`, minted in Python;
+no `AUTOINCREMENT`.
 
 ### Conditional migration
 
-Guarded by `PRAGMA user_version`, so the tool can also run against a database it has
-already produced.
+Keyed on Alembic's `alembic_version` table, so the tool can also run against a database
+it has already produced. `consolidation.database.classify_source` inspects the table
+shape first and rejects an unrecognized schema before Alembic is invoked.
 
 | Detected source | Classified as | Action |
 | --- | --- | --- |
-| `user_version = 0` **and** legacy tables present: `Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct` with `SellerName` + `SellerProductId`, no `Brand`/`Category`/`Seller` tables | legacy | run the migration steps, then `PRAGMA user_version = 1` |
-| `user_version = 1` **and** target tables present: `Brand`, `Category`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct` has `ExternalSku` | already migrated | skip the migration |
+| legacy tables present: `Product` with integer `Id` + `Brand` + `Category` columns, `SellerProduct` with `SellerName` + `SellerProductId`; no `Brand`/`Category`/`Seller`/`alembic_version` tables | legacy | `alembic upgrade head` runs revision `0001` (the migration steps) and stamps `alembic_version = 0001` |
+| target tables present (`Brand`, `Category`, `Seller`; `Product.Id` is `TEXT`; `SellerProduct` has `ExternalSku`) **and** `alembic_version` at `0001` | already migrated | `alembic upgrade head` is a no-op |
 | neither | unrecognized | abort before any write, non-zero exit |
 
 The published `catalog.db` is always legacy. Re-running against a previous output
-(`user_version = 1`) re-applies the feed with idempotent writes and is a no-op when the
+(already at `0001`) re-applies the feed with idempotent writes and is a no-op when the
 feed is unchanged.
 
 ### Target schema
@@ -108,25 +111,30 @@ product genuinely has many sellers.
 
 ### Migration steps
 
-`PRAGMA foreign_keys = OFF` for the whole block; staged tables built alongside the
-originals then swapped in. Normalization and every `uuid4` are computed in Python, so
-each extraction reads distinct values and builds an in-memory map (not a pure
-`INSERT ... SELECT`).
+Revision `0001` (`migrations/versions/0001_refactor_catalog.py`) delegates to the
+helpers in `consolidation.database`. Staged tables are built alongside the originals
+then swapped in. FK enforcement is not toggled — SQLite's `PRAGMA foreign_keys` is a
+no-op inside a transaction and the whole refactor runs in one — so SQLAlchemy's default
+(FK enforcement off) stands during the rebuild and `PRAGMA foreign_key_check` validates
+at the end. Normalization and every `uuid4` are computed in Python, so each extraction
+reads distinct values and builds an in-memory map (not a pure `INSERT ... SELECT`).
 
-1. **`Product.Brand` → `Brand`**: `(uuid4(), name)` per distinct normalized non-empty
+1. **staging tables**: create `Brand`, `Category`, `Seller`, `Product_new`,
+   `SellerProduct_new`.
+2. **`Product.Brand` → `Brand`**: `(uuid4(), name)` per distinct normalized non-empty
    brand (**637** rows); keep `{normalized_brand: id}`.
-2. **`Product.Category` → `Category`**: same (**43** rows); keep `{normalized_category: id}`.
-3. **`Product` rebuild**: `Product_new`; per old row `(uuid4(), Name, brand_map.get(...),
-   category_map.get(...))`; keep `{old_int_id: new_uuid}`.
-4. **`SellerProduct.SellerName` → `Seller`**: `(uuid4(), name)` per distinct name (base
-   table empty → 0 rows; sellers are created later from the feed).
-5. **`SellerProduct` rebuild**: `SellerProduct_new`; each old row remapped through the
-   seller and product maps, `CAST(SellerProductId AS TEXT)` → `ExternalSku` (base table
-   empty → 0 rows).
-6. `DROP` the two old tables; rename `Product_new` / `SellerProduct_new` into place.
-7. `PRAGMA foreign_keys = ON`; `PRAGMA foreign_key_check`; `PRAGMA user_version = 1`.
+3. **`Product.Category` → `Category`**: same (**43** rows); keep `{normalized_category: id}`.
+4. **`Product` rebuild**: fill `Product_new`; per old row `(uuid4(), Name,
+   brand_map.get(...), category_map.get(...))`; keep `{old_int_id: new_uuid}`.
+5. **`SellerProduct` rebuild**: extract `SellerName` → `Seller` (`(uuid4(), name)` per
+   distinct name), then fill `SellerProduct_new` from each old row remapped through the
+   seller and product maps, `str(SellerProductId)` → `ExternalSku`. Base table empty →
+   0 rows in both.
+6. `DROP` the two old tables; rename `Product_new` / `SellerProduct_new` into place;
+   clear the residual `sqlite_sequence` counters.
+7. `PRAGMA foreign_key_check` (must be empty). Alembic stamps `alembic_version = 0001`.
 
-Steps 1–7 are skipped entirely for an already-migrated source. WAL is not used; the
+The whole revision is skipped for an already-migrated source. WAL is not used; the
 output is a self-contained database written after the engine is disposed.
 
 ## Seller feed (`ProductEntry.json`)

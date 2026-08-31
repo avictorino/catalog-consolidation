@@ -10,7 +10,9 @@ introduces one, never duplicating an existing item.
 
 ## Status
 
-Project scaffolding and specification only. No application code yet.
+Download + schema refactor implemented (PR #2). The feed import (JSON streaming,
+validation, injection screen, identity resolution) is PR #3 — the pipeline currently
+stops after the refactor and publishes the refactored base catalog.
 
 - [`prd.md`](prd.md) — design rationale and decisions (why).
 - [`spec/data-profile.md`](spec/data-profile.md) — input-data profile, **the refactored schema and migration** (source of truth), and the expected result.
@@ -35,9 +37,10 @@ The given model is compromised — denormalized seller / brand / category names,
 `INTEGER` SKU column that should hold the feed's UUID strings, a useless surrogate key,
 and enumerable `AUTOINCREMENT` ids. On every run, right after download, both given
 tables are dropped and recreated and three reference tables — `Brand`, `Category`,
-`Seller` — are added, all with `uuid4` `TEXT` primary keys. It runs as a
-`PRAGMA user_version`-guarded conditional migration (a legacy source is migrated; an
-already-migrated one is left alone), so the tool can also be re-run against its own
+`Seller` — are added, all with `uuid4` `TEXT` primary keys. It runs as a single Alembic
+revision (`0001`) driven programmatically with the import connection injected, keyed on
+the `alembic_version` marker (a legacy source is migrated; an already-migrated one
+leaves `alembic upgrade head` a no-op), so the tool can also be re-run against its own
 output.
 
 - **Target schema, migration steps, kept/replaced/deleted:**
@@ -65,6 +68,7 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # Linux / macOS
 pip install -r requirements.txt -r requirements-dev.txt
+pip install -e . --no-deps        # make `python -m consolidation.cli` importable (src/ layout)
 pre-commit install
 cp .env.example .env
 ```
@@ -94,8 +98,8 @@ remote content may change.
 | Primary keys | `uuid4` stored as `TEXT`, minted in Python; no `AUTOINCREMENT` | non-enumerable, no DB coordination to mint, stable across environments; accepted cost: larger indexes, worse insert locality |
 | `Brand` / `Category` as reference, not junction | nullable `Product.BrandId` / `Product.CategoryId` FK + data migration then drop the text column | a product has one brand and one category; a junction would allow two |
 | Keep the seller SKU | `SellerProduct.ExternalSku` (opaque text) + `UNIQUE (SellerId, ExternalSku)` | needed to map a listing back to the seller's catalog; reuse is only across sellers |
-| DB access | SQLAlchemy Core (no ORM, no Alembic) | declarative schema + parameterized statements; the refactor is one `user_version`-guarded migration, not a revision chain |
-| Conditional migration | run only when the source is legacy (`user_version = 0`); skip an already-migrated DB | idempotent feed writes make incremental re-runs against a previous output safe |
+| DB access | SQLAlchemy Core (no ORM) + one Alembic revision | declarative schema + parameterized statements; the refactor is a single hand-written revision run inside the import transaction, not a revision chain |
+| Conditional migration | keyed on `alembic_version`: revision `0001` for a legacy source, no-op for an already-migrated DB | idempotent feed writes make incremental re-runs against a previous output safe |
 | Product identity | normalized `Name`; brand only as a tie-break gate; category never; feed `Id` never | category disagrees even for true duplicates; `Id` is a seller SKU |
 | Normalization | Python, shared by catalog / feed names, brands, categories | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
