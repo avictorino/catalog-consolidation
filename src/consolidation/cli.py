@@ -34,9 +34,36 @@ ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 MATCHERS = ("difflib", "rapidfuzz")
 
 
+_LEVEL_COLOR = {
+    logging.WARNING: "\033[31m",  # red
+    logging.ERROR: "\033[31m",  # red
+    logging.CRITICAL: "\033[1;31m",  # bold red
+}
+_RESET = "\033[0m"
+
+
+class _ColorFormatter(logging.Formatter):
+    def __init__(self, *args: object, color: bool, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._color = color
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        prefix = _LEVEL_COLOR.get(record.levelno)
+        if self._color and prefix:
+            return f"{prefix}{text}{_RESET}"
+        return text
+
+
 def _configure_logging() -> None:
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%H:%M:%S"))
+    handler.setFormatter(
+        _ColorFormatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            "%H:%M:%S",
+            color=sys.stderr.isatty(),
+        )
+    )
     root = logging.getLogger("consolidation")
     root.handlers.clear()
     root.addHandler(handler)
