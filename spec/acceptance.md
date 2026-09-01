@@ -20,7 +20,7 @@ tool must still be correct.
 ### Configuration
 
 - With the shipped `.env`, a bare `python -m consolidation.cli` resolves to the S3
-  sources, `catalog_output.db`, `rapidfuzz`, threshold `0.90`.
+  sources over `http`, `catalog_output.db`, `rapidfuzz`, threshold `0.90`.
 - Every option has a key in `.env`; precedence holds: CLI > `.env`.
 - Removing `.env` entirely invalidates a bare run before any work starts.
 - A `THRESHOLD` in `.env` or the CLI overrides the backend's suggested value.
@@ -115,6 +115,16 @@ Verify:
 - `--matcher difflib` runs without `rapidfuzz` installed.
 - `--threshold` overrides the backend default and changes outcomes at the boundary
   (`Roteador/Router` at `0.909`: included at `0.90`, excluded at `0.91`).
+
+### Byte-stream transport
+
+- The feed and download test suites pass with both `HttpByteSource` and `S3ByteSource`.
+- A full run with `--source s3` against `s3://…` URLs produces the same tables as
+  the default `--source http` run.
+- `--source http` runs without `boto3` reachable at import time (it is imported
+  lazily, only inside `S3ByteSource.open`).
+- An unknown `--source`, or a URL whose scheme does not match the selected source,
+  aborts the run with a logged `ERROR`.
 
 ### Security
 

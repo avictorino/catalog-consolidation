@@ -7,11 +7,12 @@ import pytest
 
 from consolidation import cli
 
-ENV_KEYS = ("CATALOG_URL", "PRODUCTS_URL", "OUTPUT", "MATCHER", "THRESHOLD")
+ENV_KEYS = ("CATALOG_URL", "PRODUCTS_URL", "OUTPUT", "SOURCE", "MATCHER", "THRESHOLD")
 FULL_ENV = {
     "CATALOG_URL": "https://example.com/catalog.db",
     "PRODUCTS_URL": "https://example.com/ProductEntry.json",
     "OUTPUT": "catalog_output.db",
+    "SOURCE": "http",
     "MATCHER": "rapidfuzz",
     "THRESHOLD": "0.90",
 }
@@ -51,6 +52,7 @@ def test_resolves_from_env_file(env_file: Path) -> None:
         "catalog_url": "https://example.com/catalog.db",
         "products_url": "https://example.com/ProductEntry.json",
         "output": Path("catalog_output.db").resolve(),
+        "source": "http",
         "matcher": "rapidfuzz",
         "threshold": pytest.approx(0.90),
     }
@@ -115,4 +117,34 @@ def test_bad_threshold_rejected(env_file: Path, bad: str) -> None:
 def test_unknown_matcher_in_env_rejected(env_file: Path) -> None:
     _write_env(env_file, {**FULL_ENV, "MATCHER": "fuzzywuzzy"})
     with pytest.raises(cli._ConfigError):
+        cli._resolve(cli._build_parser().parse_args([]))
+
+
+def test_unknown_source_rejected(env_file: Path) -> None:
+    _write_env(env_file, {**FULL_ENV, "SOURCE": "ftp"})
+    with pytest.raises(cli._ConfigError, match="source must be one of"):
+        cli._resolve(cli._build_parser().parse_args([]))
+
+
+def test_s3_source_accepts_s3_urls(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {
+            **FULL_ENV,
+            "SOURCE": "s3",
+            "CATALOG_URL": "s3://bucket/catalog.db",
+            "PRODUCTS_URL": "s3://bucket/ProductEntry.json",
+        },
+    )
+    config = cli._resolve(cli._build_parser().parse_args([]))
+    assert config["source"] == "s3"
+    assert config["catalog_url"] == "s3://bucket/catalog.db"
+
+
+def test_s3_source_rejects_plain_http_url(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {**FULL_ENV, "SOURCE": "s3", "CATALOG_URL": "http://bucket/catalog.db"},
+    )
+    with pytest.raises(cli._ConfigError, match="s3:// or https://"):
         cli._resolve(cli._build_parser().parse_args([]))

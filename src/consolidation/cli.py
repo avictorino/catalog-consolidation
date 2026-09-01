@@ -32,6 +32,7 @@ logger = logging.getLogger("consolidation")
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 MATCHERS = ("difflib", "rapidfuzz")
+SOURCES = ("http", "s3")
 
 
 _LEVEL_COLOR = {
@@ -78,6 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="destination path for the consolidated database")
     # Validate in _resolve so invalid CLI values go through the same logged error path
     # as invalid values loaded from .env.
+    parser.add_argument("--source", help="byte-stream transport for both URLs: http or s3")
     parser.add_argument("--matcher", help="similarity backend")
     parser.add_argument("--threshold", help="fuzzy cutoff, a float in [0, 1]")
     return parser
@@ -100,12 +102,19 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     catalog_url = pick("catalog-url")
     products_url = pick("products-url")
     output = pick("output")
+    source = pick("source")
     matcher = pick("matcher")
     threshold_raw = pick("threshold")
 
+    if source not in SOURCES:
+        raise _ConfigError(f"source must be one of {SOURCES}, got: {source!r}")
+
     for name, url in (("catalog-url", catalog_url), ("products-url", products_url)):
         scheme = urlparse(url).scheme
-        if scheme == "http":
+        if source == "s3":
+            if scheme not in ("s3", "https"):
+                raise _ConfigError(f"{name} must be s3:// or https:// when source=s3, got: {url!r}")
+        elif scheme == "http":
             logger.warning("non-TLS URL key=%s url=%s", name, url)
         elif scheme != "https":
             raise _ConfigError(f"{name} must be an http(s) URL, got: {url!r}")
@@ -124,6 +133,7 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
         "catalog_url": catalog_url,
         "products_url": products_url,
         "output": Path(output).resolve(),
+        "source": source,
         "matcher": matcher,
         "threshold": threshold,
     }
@@ -138,10 +148,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("invalid configuration: %s", exc)
         return 2
     logger.info(
-        "configuration catalog_url=%s products_url=%s output=%s matcher=%s threshold=%s",
+        "configuration catalog_url=%s products_url=%s output=%s source=%s matcher=%s threshold=%s",
         config["catalog_url"],
         config["products_url"],
         config["output"],
+        config["source"],
         config["matcher"],
         config["threshold"],
     )
@@ -150,16 +161,17 @@ def main(argv: list[str] | None = None) -> int:
     resolver = ProductIdentityResolver(
         infrastructure.build_similarity(config["matcher"]), config["threshold"]
     )
+    source = infrastructure.build_source(config["source"])
     repository = infrastructure.SqliteCatalogRepository()
     output = config["output"]
     try:
-        prepared = usecase.PrepareCatalogDatabaseUseCase(repository).execute(
+        prepared = usecase.PrepareCatalogDatabaseUseCase(repository, source).execute(
             config["catalog_url"], output.parent
         )
     except Exception:
         logger.exception("run failed")
         return 1
-    return usecase.ConsolidateCatalogUseCase(repository, resolver).execute(
+    return usecase.ConsolidateCatalogUseCase(repository, resolver, source).execute(
         prepared, config["products_url"], output
     )
 

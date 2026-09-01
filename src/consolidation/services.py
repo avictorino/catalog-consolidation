@@ -11,8 +11,9 @@ Depends on: :mod:`consolidation.domain`.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from consolidation.domain import Catalog, Product, Submission, brands_compatible, normalize
 
@@ -25,6 +26,22 @@ class Similarity(Protocol):
 
     def score(self, a: str, b: str) -> float:
         """Return a score in the inclusive range [0, 1] for two normalized strings."""
+
+
+class ByteSource(Protocol):
+    """Port: open a readable byte stream for a reference (URL / URI).
+
+    One transport per backend, chosen at the composition root and injected into
+    the use cases the same way :class:`Similarity` is. Concrete adapters live in
+    :mod:`consolidation.infrastructure` (``HttpByteSource``, ``S3ByteSource``);
+    both the catalog download and the seller feed read through this port, so the
+    use cases never import ``requests`` or ``boto3``.
+    """
+
+    name: str
+
+    def open(self, ref: str) -> AbstractContextManager[BinaryIO]:
+        """Context manager yielding a binary stream positioned at the start of ``ref``."""
 
 
 def _digit_tokens(value: str) -> Counter[str]:

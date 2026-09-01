@@ -9,15 +9,19 @@ Entry point: `python -m consolidation.cli`.
 
 | Option | `.env` key | `.env.example` value | Meaning |
 | --- | --- | --- | --- |
-| `--catalog-url` | `CATALOG_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db` | HTTP(S) URL of the base SQLite catalog |
-| `--products-url` | `PRODUCTS_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json` | HTTP(S) URL of the seller feed |
+| `--catalog-url` | `CATALOG_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db` | URL of the base SQLite catalog |
+| `--products-url` | `PRODUCTS_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json` | URL of the seller feed |
 | `--output` | `OUTPUT` | `catalog_output.db` (in the current working directory) | destination path for the consolidated database |
+| `--source` | `SOURCE` | `http` | byte-stream transport for both URLs: `http` or `s3` |
 | `--matcher` | `MATCHER` | `rapidfuzz` | similarity backend: `rapidfuzz` (default) or `difflib` |
 | `--threshold` | `THRESHOLD` | `0.90` | float in `[0, 1]`; the fuzzy cutoff |
 
-- Only HTTP(S) URLs are accepted for `--catalog-url` and `--products-url`. Local files
-  are not supported in this version.
-- A non-TLS `http://` URL is allowed but logged as a warning.
+- `--source http` (default) accepts only HTTP(S) URLs for `--catalog-url` and
+  `--products-url`; a non-TLS `http://` URL is allowed but logged as a warning.
+- `--source s3` streams both objects with `boto3` `get_object` **unsigned** (the
+  objects must be publicly readable, no credentials resolved). URLs must then be
+  `s3://bucket/key` or an `…amazonaws.com` HTTP(S) URL.
+- Local files are not supported in this version.
 
 ### Configuration resolution
 
@@ -29,8 +33,9 @@ in `.env`**. There is no environment-variable layer and there are no built-in fa
 - If an option is set in **neither** the CLI nor `.env`, the run is invalid: an
   `ERROR` is logged and the process exits non-zero before any work starts. A missing
   `.env` file is treated the same as an empty one.
-- Invalid values (unknown `--matcher`, non-float or out-of-range `--threshold`, a
-  non-HTTP(S) URL) are also logged as `ERROR` and abort the run.
+- Invalid values (unknown `--matcher`, unknown `--source`, non-float or
+  out-of-range `--threshold`, a URL whose scheme does not match the selected
+  source) are also logged as `ERROR` and abort the run.
 
 ## 2. Input validation (seller feed)
 
@@ -61,7 +66,7 @@ tokenizer/fingerprint engine used by WAFs such as ModSecurity.
   (`"TestBrand'; SELECT 1; --"`) from benign apostrophes and quotes in legitimate data
   (`"Levi's"`, `12.9''`). Residual false-positive risk is accepted; the `threat` list
   in the final report lets an operator review every rejected entry.
-- Parameterized SQL (§4) remains the actual defense; this screen is defense in depth
+- Parameterized SQL (§5) remains the actual defense; this screen is defense in depth
   and alerting.
 
 ## 3. Identity resolution
@@ -118,7 +123,24 @@ this point.
   `ProductCategory` when necessary; a category difference is logged at `WARNING`.
 - `ExternalSku` stores the feed `Id` of the entry that first created the link.
 
-## 4. Persistence
+## 4. Input transport
+
+- Both URLs are read through one `ByteSource` (in `consolidation.services`),
+  selected by `--source` at the composition root and injected into
+  `PrepareCatalogDatabaseUseCase` and `ConsolidateCatalogUseCase`. The use cases,
+  `download_to` and `iter_feed` never import `requests` or `boto3`.
+- `HttpByteSource` (`--source http`) streams with `requests` and is the default.
+  `S3ByteSource` (`--source s3`) streams with `boto3` `get_object`, signature
+  version `UNSIGNED` — no credential chain is consulted and the objects must be
+  public. `boto3` is imported lazily inside `S3ByteSource.open`, so
+  `--source http` must not require it.
+- `parse_s3_ref` accepts `s3://bucket/key`, virtual-hosted
+  `https://bucket.s3.<region>.amazonaws.com/key`, and path-style
+  `https://s3.<region>.amazonaws.com/bucket/key`.
+- Both transports satisfy the identical `open(ref) -> context-managed binary
+  stream` contract and pass the same feed/download test suite.
+
+## 5. Persistence
 
 - Database access is through **SQLAlchemy Core** — declarative `Table` metadata
   (`consolidation.schema`), `insert()` / `select()` in the repositories
@@ -145,14 +167,14 @@ this point.
   code.
 - A failure during the final atomic replacement also preserves the previous output.
 
-## 5. Schema refactor (on the downloaded copy, before feed processing)
+## 6. Schema refactor (on the downloaded copy, before feed processing)
 
 The full target schema, the `alembic_version` guard, the kept/replaced/deleted
 breakdown, and the migration steps are defined in
 [`data-profile.md#refactored-database`](data-profile.md#refactored-database). Normative
 requirements on top of that:
 
-- The refactor runs **inside the setup transaction** (§4), before the first
+- The refactor runs **inside the setup transaction** (§5), before the first
   feed entry is processed — Alembic is invoked with that connection injected.
 - It is **conditional**: `classify_source` rejects an unrecognized schema before any
   write with a non-zero exit; otherwise `alembic upgrade head` runs — revision `0001`
@@ -172,11 +194,11 @@ requirements on top of that:
 - No Alembic offline (`--sql`) mode and no autogenerate; the single revision is
   hand-written.
 
-## 6. Matcher interface
+## 7. Matcher interface
 
 The `Similarity` protocol (in `consolidation.services`) and its two implementations
 (in `consolidation.infrastructure`) are described in
-[`prd.md#matcher-layer-dependency-injection`](../prd.md#matcher-layer-dependency-injection).
+[`prd.md#injected-seams-dependency-injection`](../prd.md#injected-seams-dependency-injection).
 Normative requirements:
 
 - Both implementations satisfy the identical `score(a, b) -> float` (`[0, 1]`) contract
@@ -186,8 +208,9 @@ Normative requirements:
   `rapidfuzz` is imported lazily — `--matcher difflib` must not require it.
 - `fuzz.WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
 - Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan.
+- The `ByteSource` transport (§4) follows the same port/adapter/lazy-import shape.
 
-## 7. Report and exit codes
+## 8. Report and exit codes
 
 The final summary reports: `processed`, `new`, `linked`, `skipped`, `threat`, `failed`.
 
@@ -207,11 +230,13 @@ Exit codes:
   item persistence, publication). Item failures are reported after the feed is
   exhausted and do not prevent successful items from being published.
 
-## 8. Logging
+## 9. Logging
 
-- Uniform format: `HH:MM:SS [LEVEL] message key=value ...`.
-- `INFO`: effective configuration (no secrets), each stage, the first record, progress
-  every 1000 records, commit, publication, final summary (with all five counters).
+- Uniform format: `HH:MM:SS [LEVEL] message key=value ...`. On a TTY, `WARNING` and
+  `ERROR` lines are coloured red; output to a pipe or file carries no ANSI.
+- `INFO`: effective configuration (no secrets; includes `source=`), each stage
+  (the download and feed lines carry `via=<source>`), the first record, progress
+  every 1000 records, commit, publication, final summary (with all six counters).
 - `WARNING`: SQL injection attempt (`event=sqli_attempt`), use of an approximate match,
   tolerated category divergence, replacement of an existing output, non-TLS URL. When
   `threat > 0`, a summary `WARNING` repeats the count.

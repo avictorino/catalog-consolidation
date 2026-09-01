@@ -19,7 +19,7 @@ the database.
 
 | Concern | Choice | Notes |
 | --- | --- | --- |
-| HTTP | `requests` (streaming) | chunked download of the DB; streamed body for the feed |
+| Byte transport | `requests` (streaming) / `boto3` (`get_object`) | interchangeable `ByteSource` backends behind `--source http\|s3`; both feed the same chunked download and streamed feed. `boto3` imported lazily |
 | JSON | `ijson` | incremental array parsing; no full document in memory |
 | Feed validation | `pydantic` v2 | one object at a time (`model_validate`) |
 | Similarity | `difflib` (stdlib) / `rapidfuzz` | interchangeable `score()` backends |
@@ -50,10 +50,10 @@ Seven modules, one per layer — full walkthrough in
 | Module | Layer | What it holds |
 | --- | --- | --- |
 | `domain.py` | domain | `normalize` / `new_uuid` / `brands_compatible`, the `Product` and `Catalog` entities, the `Submission` contract — no project or I/O imports |
-| `services.py` | domain services / ports | `resolve_product` (the identity rules) wrapped by the `ProductIdentityResolver` facade (backend + threshold); the `Similarity` port |
+| `services.py` | domain services / ports | `resolve_product` (the identity rules) wrapped by the `ProductIdentityResolver` facade (backend + threshold); the `Similarity` port; the `ByteSource` port |
 | `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories` (bundle): the **only** code that touches the connection — `load_catalog`, `entry_transaction()`, `reload()`; the connection is private (`_conn`) |
 | `schema.py` | persistence schema | SQLAlchemy `Table` metadata only; no function takes a `Connection` |
-| `infrastructure.py` | infrastructure | `download_to` / `verify_sqlite_header`, streamed feed (`iter_feed`) + ACL (`ProductEntry`), `screen_entry`, `Difflib`/`RapidFuzz` backends + `build_similarity`, Alembic wiring, the migration steps (`classify_source`, `rebuild_*`, …), and `SqliteCatalogRepository` (the `CatalogRepository` adapter) |
+| `infrastructure.py` | infrastructure | `HttpByteSource`/`S3ByteSource` + `build_source`, `download_to` / `verify_sqlite_header`, streamed feed (`iter_feed`) + ACL (`ProductEntry`), `screen_entry`, `Difflib`/`RapidFuzz` backends + `build_similarity`, Alembic wiring, the migration steps (`classify_source`, `rebuild_*`, …), and `SqliteCatalogRepository` (the `CatalogRepository` adapter) |
 | `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, the `ConsolidateCatalogUseCase` coordinator, the `Report` read model, and the `CatalogRepository` port definition |
 | `cli.py` | interface / composition root | resolves config, builds the `ProductIdentityResolver` and `SqliteCatalogRepository`, runs the two use cases in order |
 
@@ -190,14 +190,25 @@ difference is logged at `WARNING`.
 | Same seller offers the same product twice | `GardenStore` Câmera/Camera, plus 11 more entries | one link; the first entry's SKU is kept, the rest log `duplicate_listing` |
 | Null `Brand` / `Category` | brand: 3 feed / 119 catalog rows; category: 34 catalog rows | `BrandId` is `NULL` or `ProductCategory` has no row; absent brand does not block a name match |
 
-## Matcher layer (dependency injection)
+## Injected seams (dependency injection)
 
-One injection point: the similarity backend. The **port** (`Similarity`) lives in the
-domain-services layer, the **adapters** in infrastructure. The **composition root**
-(`cli`) picks one by name and wraps it — together with the threshold — in a
-`ProductIdentityResolver`, which is the single object injected down the call chain
-(`ConsolidateCatalogUseCase` -> `ConsolidateFeedUseCase` -> `ConsolidateEntryUseCase`).
-No `similarity` or `threshold` is threaded layer by layer; no DI container, no framework.
+Two ports, same shape, same wiring — the **port** lives in the domain-services
+layer, the **adapters** in infrastructure, and the **composition root** (`cli`)
+picks one by name:
+
+- **`Similarity`** — the fuzzy-scoring backend (`difflib` / `rapidfuzz`), wrapped
+  with the threshold in a `ProductIdentityResolver`.
+- **`ByteSource`** — the byte-stream transport (`http` via `requests` /
+  `s3` via `boto3`), used for **both** the catalog download and the feed. Chosen
+  with `--source`; `boto3` is imported lazily, only on the `s3` path, and the
+  request is unsigned (public objects only). This is a code-challenge showcase of
+  the adapter pattern applied to external I/O beyond the matcher — the S3 path is
+  not otherwise needed for the given HTTPS sources.
+
+Neither `similarity`, `threshold`, `requests` nor `boto3` is threaded layer by
+layer; no DI container, no framework. The similarity backend + threshold ride
+down the call chain inside the `ProductIdentityResolver`; the `ByteSource` is
+passed to `PrepareCatalogDatabaseUseCase` and `ConsolidateCatalogUseCase`.
 
 ```python
 # consolidation/services.py — the port (a domain-owned contract)
@@ -217,7 +228,12 @@ class Similarity(Protocol):
   `.env` or the environment overrides it.
 
 ```python
-# consolidation/infrastructure.py — the factory (adapters + lazy import)
+# consolidation/services.py — the second port (also a domain-owned contract)
+class ByteSource(Protocol):
+    name: str
+    def open(self, ref: str) -> AbstractContextManager[BinaryIO]: ...   # stream at ref start
+
+# consolidation/infrastructure.py — the factories (adapters + lazy import)
 def build_similarity(name: str) -> Similarity:
     if name == "difflib":
         return DifflibSimilarity()
@@ -225,10 +241,19 @@ def build_similarity(name: str) -> Similarity:
         return RapidFuzzSimilarity()          # `from rapidfuzz import fuzz` happens inside .score
     raise ValueError(f"unknown matcher: {name!r} (options: difflib, rapidfuzz)")
 
-# consolidation/cli.py — composition root: build the resolver once, inject it
+def build_source(name: str) -> ByteSource:
+    if name == "http":
+        return HttpByteSource()
+    if name == "s3":
+        return S3ByteSource()                 # `import boto3` happens inside .open
+    raise ValueError(f"unknown source: {name!r} (options: http, s3)")
+
+# consolidation/cli.py — composition root: build the collaborators once, inject them
 resolver = ProductIdentityResolver(build_similarity(config["matcher"]), threshold)
-ConsolidateCatalogUseCase(repository, resolver).execute(prepared, products_url, output)
-#   -> ConsolidateFeedUseCase(repositories, resolver).execute(feed)
+source = build_source(config["source"])
+PrepareCatalogDatabaseUseCase(repository, source).execute(catalog_url, dest_dir)
+ConsolidateCatalogUseCase(repository, resolver, source).execute(prepared, products_url, output)
+#   -> ConsolidateFeedUseCase(repositories, resolver).execute(feed)   # feed = iter_feed(url, source)
 #   -> ConsolidateEntryUseCase(repositories, resolver)   # resolver.resolve(catalog, submission)
 ```
 
@@ -244,10 +269,11 @@ instant). Indexed candidate reduction is out of scope.
 The composition root (`cli`) runs the two use cases in order.
 
 1. Resolve and validate configuration (CLI plus `.env` next to the entry point); the
-   composition root builds the `ProductIdentityResolver` (backend + threshold) and
-   the `SqliteCatalogRepository`.
+   composition root builds the `ProductIdentityResolver` (backend + threshold), the
+   `ByteSource` (`http`/`s3`) and the `SqliteCatalogRepository`.
 2. **`PrepareCatalogDatabaseUseCase`** — download `catalog.db` in chunks to a temp
-   file (fresh every run), then drive an injected `CatalogRepository` port
+   file (fresh every run) through the injected `ByteSource`, then drive an injected
+   `CatalogRepository` port
    (`verify_database` → `connect` → `begin` → `classify_source` → `upgrade` →
    `commit`/`rollback` → `enable_foreign_keys`); the use case never sees SQLAlchemy,
    Alembic or the `sqlite:///` scheme. The SQLite adapter verifies the header,
@@ -261,9 +287,10 @@ The composition root (`cli`) runs the two use cases in order.
 3. **`ConsolidateCatalogUseCase.execute(prepared_database, …)`** — takes the same
    still-connected `repository` (the single `CatalogRepository`), consumes the
    feed on its live connection, then closes it before publishing.
-4. **`ConsolidateFeedUseCase`** — stream `ProductEntry.json` with `requests` +
-   `ijson`; validate each object with Pydantic; screen each string field with
-   `libinjection`. For each surviving entry, inside `repositories.entry_transaction()`,
+4. **`ConsolidateFeedUseCase`** — stream `ProductEntry.json` through the injected
+   `ByteSource` + `ijson`; validate each object with Pydantic; screen each string
+   field with `libinjection`. For each surviving entry, inside
+   `repositories.entry_transaction()`,
    `ConsolidateEntryUseCase` resolves the product; when inserting a new product it
    mints a `uuid4` and `get_or_create`s its brand and category, adds the category
    membership; `get_or_create`s the seller; links them (idempotent); accumulate

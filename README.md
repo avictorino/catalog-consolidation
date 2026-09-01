@@ -23,8 +23,8 @@ An expected successful run has the following shape. Timestamps, UUIDs, and tempo
 paths vary between executions:
 
 ```text
-HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db matcher=rapidfuzz threshold=0.9
-HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<workspace>/.catalog-<hash>.db.tmp
+HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db source=http matcher=rapidfuzz threshold=0.9
+HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db via=http dest=<workspace>/.catalog-<hash>.db.tmp
 HH:MM:SS [INFO] download complete bytes=61440
 HH:MM:SS [INFO] source classified as=legacy
 HH:MM:SS [INFO] extracted reference table=Brand rows=637
@@ -35,9 +35,9 @@ HH:MM:SS [INFO] rebuilt SellerProduct sellers=0 links=0
 HH:MM:SS [INFO] schema refactor committed
 HH:MM:SS [INFO] foreign key enforcement enabled
 HH:MM:SS [INFO] catalog database prepared path=<workspace>/.catalog-<hash>.db.tmp
-HH:MM:SS [INFO] run config products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json matcher=rapidfuzz threshold=0.9
+HH:MM:SS [INFO] run config products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json source=http matcher=rapidfuzz threshold=0.9
 HH:MM:SS [INFO] catalog loaded products=975
-HH:MM:SS [INFO] streaming seller feed url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json
+HH:MM:SS [INFO] streaming seller feed url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json via=http
 HH:MM:SS [INFO] first feed record received
 HH:MM:SS [WARNING] event=approximate_match record=57 seller=FootwearHub product=Router WiFi 6 TP-Link score=0.909
 HH:MM:SS [WARNING] event=approximate_match record=64 seller=SuperMart product=Processor AMD Ryzen 9 7950X score=0.964
@@ -90,12 +90,12 @@ A small, educational DDD layering — one module per layer (details and diagrams
 | Module | Layer | Responsibility |
 | --- | --- | --- |
 | `domain.py` | domain | normalization, `Product` / `Catalog` entities, the `Submission` contract — no I/O, no project imports |
-| `services.py` | domain services / ports | `ProductIdentityResolver` (the identity rules) and the `Similarity` port |
+| `services.py` | domain services / ports | `ProductIdentityResolver` (the identity rules), the `Similarity` port, and the `ByteSource` port |
 | `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories` — the only code that touches the DB connection (`load_catalog`, `entry_transaction()`, `reload()`) |
 | `schema.py` | persistence schema | SQLAlchemy `Table` metadata only |
-| `infrastructure.py` | infrastructure | HTTP download, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, and `SqliteCatalogRepository` |
+| `infrastructure.py` | infrastructure | byte-stream transports (`HttpByteSource` / `S3ByteSource`), catalog download, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, and `SqliteCatalogRepository` |
 | `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, the `ConsolidateCatalogUseCase` coordinator, and the `CatalogRepository` port |
-| `cli.py` | interface / composition root | resolves config, builds the resolver + repository, runs the two use cases in order |
+| `cli.py` | interface / composition root | resolves config, builds the resolver + byte source + repository, runs the two use cases in order |
 
 Dependencies point inward: `cli → usecase → services → domain`, with `repository`
 and `infrastructure` implementing the ports the use cases declare. `domain.py`
@@ -103,10 +103,12 @@ imports nothing from the project; `schema.py` has no function that takes a
 `Connection`; raw `conn.begin/commit/rollback/execute` lives **only** inside
 `repository.py` and the `SqliteCatalogRepository` adapter.
 
-`cli.py` injects exactly two collaborators: one `CatalogRepository` (prepares the
-database, then hands out the `CatalogRepositories` bundle) and one
-`ProductIdentityResolver` (carrying the similarity backend and the threshold) —
-nothing threads `similarity` or `threshold` from layer to layer.
+`cli.py` injects three collaborators: one `CatalogRepository` (prepares the
+database, then hands out the `CatalogRepositories` bundle), one
+`ProductIdentityResolver` (carrying the similarity backend and the threshold), and
+one `ByteSource` (the transport both the catalog download and the feed read
+through — `HttpByteSource` or `S3ByteSource`). Nothing threads `similarity`,
+`threshold` or `requests`/`boto3` from layer to layer.
 
 Run flow: `cli` resolves config → `PrepareCatalogDatabaseUseCase` downloads and
 migrates `catalog.db`, leaving the repository connected with foreign keys on →
@@ -119,6 +121,7 @@ migrates `catalog.db`, leaving the repository connected with foreign keys on →
 | --- | --- |
 | Base catalog | `catalog.db` on S3 (`--catalog-url`) |
 | Seller feed | `ProductEntry.json` on S3 (`--products-url`) |
+| Transport | `http` — `requests` over HTTPS (`--source`; `s3` uses `boto3`) |
 | Output | `catalog_output.db` in the working directory (`--output`) |
 
 Every run downloads a fresh copy of the base catalog, **refactors its schema** (see
@@ -146,14 +149,28 @@ output.
 ```
 python -m consolidation.cli \
   [--catalog-url URL] [--products-url URL] [--output PATH] \
-  [--matcher difflib|rapidfuzz] [--threshold FLOAT]
+  [--source http|s3] [--matcher difflib|rapidfuzz] [--threshold FLOAT]
 ```
 
 - Every option has a default in `.env` (copied from `.env.example`), so a bare
-  `python -m consolidation.cli` runs against the S3 sources with `rapidfuzz` at `0.90`.
+  `python -m consolidation.cli` runs against the S3 sources over `http` with
+  `rapidfuzz` at `0.90`.
+- `--source` selects the byte-stream transport used for **both** URLs: `http`
+  (default, `requests` over HTTPS) or `s3` (`boto3` `get_object`, unsigned — the
+  objects must be publicly readable). For `s3`, point the URLs at
+  `s3://bucket/key` or an `…amazonaws.com` host. Both implement the same
+  `open(ref) -> stream` contract (`services.ByteSource`), the same way the
+  matchers implement `Similarity`.
 - `--matcher` selects the similarity backend: `rapidfuzz` (default) or `difflib`
   (optional fallback). Both implement the same `score(a, b) -> float` contract.
 - `--threshold` overrides the backend's suggested cutoff and the `.env` value.
+
+```bash
+# same run, streamed through boto3 instead of requests
+python -m consolidation.cli --source s3 \
+  --catalog-url s3://engineering-hiring-process/catalog.db \
+  --products-url s3://engineering-hiring-process/ProductEntry.json
+```
 
 ### Why `rapidfuzz` is the default
 

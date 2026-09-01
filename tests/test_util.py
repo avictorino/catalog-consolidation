@@ -8,7 +8,9 @@ import requests
 import responses
 
 from consolidation.domain import normalize
-from consolidation.infrastructure import download_to, verify_sqlite_header
+from consolidation.infrastructure import HttpByteSource, download_to, verify_sqlite_header
+
+_HTTP = HttpByteSource()
 
 # --------------------------------------------------------------------------- #
 # normalize
@@ -57,7 +59,7 @@ SQLITE_BYTES = b"SQLite format 3\x00" + b"\x00" * 512
 @responses.activate
 def test_download_writes_temp_file(tmp_path: Path) -> None:
     responses.add(responses.GET, URL, body=SQLITE_BYTES, status=200)
-    path = download_to(URL, tmp_path)
+    path = download_to(URL, tmp_path, _HTTP)
     assert path.parent == tmp_path
     assert path.read_bytes() == SQLITE_BYTES
     verify_sqlite_header(path)
@@ -67,14 +69,14 @@ def test_download_writes_temp_file(tmp_path: Path) -> None:
 def test_http_error_raises_and_leaves_no_temp(tmp_path: Path) -> None:
     responses.add(responses.GET, URL, status=404)
     with pytest.raises(requests.HTTPError):
-        download_to(URL, tmp_path)
+        download_to(URL, tmp_path, _HTTP)
     assert list(tmp_path.glob("*.tmp")) == []
 
 
 @responses.activate
 def test_non_sqlite_body_rejected_by_header_check(tmp_path: Path) -> None:
     responses.add(responses.GET, URL, body=b"<!DOCTYPE html><html>nope</html>", status=200)
-    path = download_to(URL, tmp_path)
+    path = download_to(URL, tmp_path, _HTTP)
     with pytest.raises(ValueError, match="not a SQLite database"):
         verify_sqlite_header(path)
 

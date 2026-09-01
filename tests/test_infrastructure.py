@@ -3,17 +3,25 @@ from __future__ import annotations
 import io
 import json
 
+import boto3
 import pytest
 import responses
+from moto import mock_aws
 
 from consolidation.infrastructure import (
     FeedError,
     FeedValidationError,
+    HttpByteSource,
     ProductEntry,
+    S3ByteSource,
+    build_source,
     iter_entries,
     iter_feed,
+    parse_s3_ref,
     screen_entry,
 )
+
+_HTTP = HttpByteSource()
 
 
 class _ChunkedStream:
@@ -58,7 +66,69 @@ def test_iter_feed_streams_http_response() -> None:
         body=json.dumps([_entry()], ensure_ascii=False).encode(),
         status=200,
     )
-    assert [entry.Name for entry in iter_feed(url)] == ["Câmera Canon EOS R6"]
+    assert [entry.Name for entry in iter_feed(url, _HTTP)] == ["Câmera Canon EOS R6"]
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("s3://my-bucket/path/to/ProductEntry.json", ("my-bucket", "path/to/ProductEntry.json")),
+        (
+            "https://my-bucket.s3.us-east-1.amazonaws.com/ProductEntry.json",
+            ("my-bucket", "ProductEntry.json"),
+        ),
+        (
+            "https://s3.us-east-1.amazonaws.com/my-bucket/nested/key.json",
+            ("my-bucket", "nested/key.json"),
+        ),
+    ],
+)
+def test_parse_s3_ref(ref: str, expected: tuple[str, str]) -> None:
+    assert parse_s3_ref(ref) == expected
+
+
+def test_parse_s3_ref_rejects_non_s3() -> None:
+    with pytest.raises(ValueError, match="not an S3 reference"):
+        parse_s3_ref("https://example.com/ProductEntry.json")
+
+
+def test_build_source_dispatch() -> None:
+    assert isinstance(build_source("http"), HttpByteSource)
+    assert isinstance(build_source("s3"), S3ByteSource)
+    with pytest.raises(ValueError, match="unknown source"):
+        build_source("ftp")
+
+
+@mock_aws
+def test_iter_feed_streams_s3_object() -> None:
+    client = boto3.client("s3", region_name="us-east-1")
+    client.create_bucket(Bucket="feeds")
+    client.put_bucket_policy(
+        Bucket="feeds",
+        Policy=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "s3:GetObject",
+                        "Resource": "arn:aws:s3:::feeds/*",
+                    }
+                ],
+            }
+        ),
+    )
+    client.put_object(
+        Bucket="feeds",
+        Key="ProductEntry.json",
+        Body=json.dumps([_entry(), _entry(Name="Router WiFi 6")], ensure_ascii=False).encode(),
+    )
+    ref = "s3://feeds/ProductEntry.json"
+    assert [e.Name for e in iter_feed(ref, S3ByteSource())] == [
+        "Câmera Canon EOS R6",
+        "Router WiFi 6",
+    ]
 
 
 def test_iter_entries_ignores_unknown_fields() -> None:

@@ -39,7 +39,7 @@ from consolidation.infrastructure import (
     screen_entry,
 )
 from consolidation.repository import CatalogRepositories
-from consolidation.services import ProductIdentityResolver
+from consolidation.services import ByteSource, ProductIdentityResolver
 
 logger = logging.getLogger("consolidation")
 
@@ -256,17 +256,20 @@ class PrepareCatalogDatabaseUseCase:
     file ready to be consolidated.
 
     Every database-specific step goes through the injected
-    :class:`CatalogRepository`; this use case does not know it is SQLite. On
-    success the repository is left **connected** (with foreign keys enabled) so
-    the next use case consumes on the same connection — the caller owns closing
-    it. On any failure the repository is closed and the partial file deleted.
+    :class:`CatalogRepository`; this use case does not know it is SQLite, and the
+    catalog bytes arrive through the injected ``ByteSource`` (HTTP or S3), so it
+    does not know the transport either. On success the repository is left
+    **connected** (with foreign keys enabled) so the next use case consumes on the
+    same connection — the caller owns closing it. On any failure the repository is
+    closed and the partial file deleted.
     """
 
-    def __init__(self, repository: CatalogRepository) -> None:
+    def __init__(self, repository: CatalogRepository, source: ByteSource) -> None:
         self.repository = repository
+        self.source = source
 
     def execute(self, catalog_url: str, dest_dir: str | Path) -> Path:
-        tmp = download_to(catalog_url, dest_dir)
+        tmp = download_to(catalog_url, dest_dir, self.source)
         try:
             self.repository.verify_database(tmp)
             self.repository.connect(tmp)
@@ -394,14 +397,21 @@ class ConsolidateCatalogUseCase:
     prepared file path.
 
     Injected collaborators: ``repository`` (the ``CatalogRepository`` — source of
-    both the live connection and the per-aggregate bundle) and ``resolver`` (a
-    ready ``ProductIdentityResolver``, already carrying the similarity backend and
-    the threshold).
+    both the live connection and the per-aggregate bundle), ``resolver`` (a ready
+    ``ProductIdentityResolver``, already carrying the similarity backend and the
+    threshold) and ``source`` (the ``ByteSource`` transport the feed streams
+    through).
     """
 
-    def __init__(self, repository: CatalogRepository, resolver: ProductIdentityResolver) -> None:
+    def __init__(
+        self,
+        repository: CatalogRepository,
+        resolver: ProductIdentityResolver,
+        source: ByteSource,
+    ) -> None:
         self.repository = repository
         self.resolver = resolver
+        self.source = source
 
     def execute(
         self,
@@ -412,8 +422,9 @@ class ConsolidateCatalogUseCase:
         prepared_database = Path(prepared_database)
         output = Path(output).resolve()
         logger.info(
-            "run config products_url=%s matcher=%s threshold=%s",
+            "run config products_url=%s source=%s matcher=%s threshold=%s",
             products_url,
+            self.source.name,
             self.resolver.similarity.name,
             self.resolver.threshold,
         )
@@ -438,7 +449,7 @@ class ConsolidateCatalogUseCase:
 
     def _consume_feed(self, products_url: str) -> Report:
         repositories = self.repository.catalog_repositories()
-        feed = iter_feed(products_url)
+        feed = iter_feed(products_url, self.source)
         report = ConsolidateFeedUseCase(repositories, self.resolver).execute(feed)
         logger.info("feed processing complete")
         return report

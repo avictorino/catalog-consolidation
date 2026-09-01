@@ -7,3 +7,4 @@ python-dotenv==1.2.2
 SQLAlchemy==2.0.36
 alembic==1.14.1
 libinjection-python==1.1.6
+boto3==1.43.85  # S3 byte-stream transport (imported lazily; only for source=s3)

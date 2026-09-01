@@ -2,19 +2,22 @@
 outside the repositories.
 
 Everything that talks to something external or runs SQL against the connection:
-the HTTP catalog download, the streamed seller feed and its anti-corruption layer
-(``ProductEntry``), the SQL-injection screen, the concrete similarity backends,
-the Alembic wiring, the schema-refactor steps the Alembic revision executes
-(source classification + the staged rebuild), and ``SqliteCatalogRepository`` —
-the SQLite adapter for the ``CatalogRepository`` port the use cases depend on.
-Nothing here holds business rules.
+the catalog download and the streamed seller feed, the byte-stream transports
+they read through (``HttpByteSource`` / ``S3ByteSource``, adapters for the
+``services.ByteSource`` port), the anti-corruption layer (``ProductEntry``), the
+SQL-injection screen, the concrete similarity backends, the Alembic wiring, the
+schema-refactor steps the Alembic revision executes (source classification + the
+staged rebuild), and ``SqliteCatalogRepository`` — the SQLite adapter for the
+``CatalogRepository`` port the use cases depend on. Nothing here holds business
+rules.
 
 The declarative table metadata itself stays in :mod:`consolidation.schema`;
 this module only *executes* against a database.
 
 Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
 :mod:`consolidation.repository`; plus requests / ijson / pydantic / libinjection /
-rapidfuzz / alembic / SQLAlchemy.
+rapidfuzz / alembic / SQLAlchemy. ``boto3`` is imported lazily, only when the S3
+transport is selected.
 """
 
 from __future__ import annotations
@@ -22,9 +25,11 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import BinaryIO, Literal
+from urllib.parse import urlparse
 
 import ijson
 import libinjection
@@ -37,7 +42,7 @@ from sqlalchemy.engine import Connection, Engine, Transaction
 
 from consolidation.domain import ThreatFinding, new_uuid, normalize
 from consolidation.repository import CatalogRepositories
-from consolidation.services import Similarity
+from consolidation.services import ByteSource, Similarity
 
 logger = logging.getLogger("consolidation")
 
@@ -51,26 +56,102 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
 
 # --------------------------------------------------------------------------- #
+# Byte-stream transports for the ``services.ByteSource`` port. Both the catalog
+# download and the seller feed read through one of these; the choice is made at
+# the composition root and injected, exactly like the similarity backend.
+# --------------------------------------------------------------------------- #
+class HttpByteSource:
+    """Stream an object over HTTP(S) with ``requests``."""
+
+    name = "http"
+
+    @contextmanager
+    def open(self, ref: str) -> Iterator[BinaryIO]:
+        with requests.get(ref, stream=True, timeout=_TIMEOUT) as response:
+            response.raise_for_status()
+            response.raw.decode_content = True  # transparently undo any transfer encoding
+            yield response.raw
+
+
+class _S3ReadAdapter:
+    """Wrap a botocore ``StreamingBody`` so ``read(-1)`` / ``read()`` mean "read the
+    rest" — the contract :class:`_PrefixedReader` and ``ijson`` rely on."""
+
+    def __init__(self, body: object) -> None:
+        self._body = body
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            return self._body.read()
+        return self._body.read(size)
+
+
+class S3ByteSource:
+    """Stream a **public** S3 object anonymously with ``boto3`` ``get_object``.
+
+    Accepts ``s3://bucket/key`` or a virtual-hosted / path-style
+    ``https://…amazonaws.com/…`` reference. The request is unsigned, so the object
+    must be publicly readable — no credentials are resolved or required.
+    """
+
+    name = "s3"
+
+    @contextmanager
+    def open(self, ref: str) -> Iterator[BinaryIO]:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
+
+        bucket, key = parse_s3_ref(ref)
+        client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+        body = client.get_object(Bucket=bucket, Key=key)["Body"]
+        try:
+            yield _S3ReadAdapter(body)
+        finally:
+            body.close()
+
+
+def parse_s3_ref(ref: str) -> tuple[str, str]:
+    """``(bucket, key)`` from ``s3://b/k`` or an ``…amazonaws.com`` HTTP(S) URL."""
+    parsed = urlparse(ref)
+    if parsed.scheme == "s3":
+        return parsed.netloc, parsed.path.lstrip("/")
+    if parsed.scheme in ("http", "https") and parsed.netloc.endswith("amazonaws.com"):
+        host, path = parsed.netloc, parsed.path.lstrip("/")
+        if host.startswith(("s3.", "s3-")):  # path-style: s3.<region>.amazonaws.com/<bucket>/<key>
+            bucket, _, key = path.partition("/")
+            return bucket, key
+        return host.split(".s3", 1)[0], path  # virtual-hosted: <bucket>.s3.<region>.amazonaws.com/…
+    raise ValueError(f"not an S3 reference: {ref!r}")
+
+
+def build_source(name: str) -> ByteSource:
+    """Build a byte-stream transport; ``boto3`` is imported only for the S3 path."""
+    if name == "http":
+        return HttpByteSource()
+    if name == "s3":
+        return S3ByteSource()
+    raise ValueError(f"unknown source: {name!r} (options: http, s3)")
+
+
+# --------------------------------------------------------------------------- #
 # Catalog download
 # --------------------------------------------------------------------------- #
-def download_to(url: str, dest_dir: Path) -> Path:
+def download_to(url: str, dest_dir: Path, source: ByteSource) -> Path:
     """Stream ``url`` in chunks into a fresh temp file inside ``dest_dir``.
 
-    The response body is never held whole in memory. Returns the temp file path.
+    The body is never held whole in memory. Returns the temp file path.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest_dir / f".catalog-{uuid.uuid4().hex}.db.tmp"
-    logger.info("downloading catalog url=%s dest=%s", url, tmp)
+    logger.info("downloading catalog url=%s via=%s dest=%s", url, source.name, tmp)
 
     bytes_written = 0
     try:
-        with requests.get(url, stream=True, timeout=_TIMEOUT) as response:
-            response.raise_for_status()
-            with tmp.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=_CHUNK):
-                    if chunk:
-                        handle.write(chunk)
-                        bytes_written += len(chunk)
+        with source.open(url) as stream, tmp.open("wb") as handle:
+            while chunk := stream.read(_CHUNK):
+                handle.write(chunk)
+                bytes_written += len(chunk)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
@@ -183,12 +264,11 @@ def iter_entries(stream: BinaryIO) -> Iterator[ProductEntry]:
         raise FeedError(f"invalid JSON feed: {exc}") from exc
 
 
-def iter_feed(url: str) -> Iterator[ProductEntry]:
+def iter_feed(url: str, source: ByteSource) -> Iterator[ProductEntry]:
     """Stream and parse a remote seller feed without downloading it locally."""
-    logger.info("streaming seller feed url=%s", url)
-    with requests.get(url, stream=True, timeout=_TIMEOUT) as response:
-        response.raise_for_status()
-        yield from iter_entries(response.raw)
+    logger.info("streaming seller feed url=%s via=%s", url, source.name)
+    with source.open(url) as stream:
+        yield from iter_entries(stream)
 
 
 # --------------------------------------------------------------------------- #

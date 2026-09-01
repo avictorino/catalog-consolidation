@@ -13,6 +13,7 @@ from consolidation import infrastructure, schema, usecase
 from consolidation.domain import new_uuid
 from consolidation.infrastructure import (
     DifflibSimilarity,
+    HttpByteSource,
     ProductEntry,
     SqliteCatalogRepository,
 )
@@ -157,14 +158,14 @@ def test_product_seller_values_are_copied_to_seller(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
-    def fake_download_to(url: str, dest_dir: Path) -> Path:
+    def fake_download_to(url: str, dest_dir: Path, source: object) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
         tmp = dest_dir / ".catalog-stub.db.tmp"
         shutil.copy(legacy_db, tmp)
         return tmp
 
     monkeypatch.setattr(usecase, "download_to", fake_download_to)
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(()))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(()))
     return legacy_db
 
 
@@ -177,12 +178,17 @@ def _run(output: Path, *, threshold: float = 0.90) -> int:
     output = Path(output)
     repository = SqliteCatalogRepository()
     resolver = ProductIdentityResolver(DifflibSimilarity(), threshold)
+    source = HttpByteSource()
     try:
-        prepared = PrepareCatalogDatabaseUseCase(repository).execute(_CATALOG_URL, output.parent)
+        prepared = PrepareCatalogDatabaseUseCase(repository, source).execute(
+            _CATALOG_URL, output.parent
+        )
     except Exception:
         logging.getLogger("consolidation").exception("run failed")
         return 1
-    return ConsolidateCatalogUseCase(repository, resolver).execute(prepared, _PRODUCTS_URL, output)
+    return ConsolidateCatalogUseCase(repository, resolver, source).execute(
+        prepared, _PRODUCTS_URL, output
+    )
 
 
 def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Path) -> None:
@@ -226,7 +232,7 @@ def test_pipeline_imports_feed(
             }
         ),
     ]
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(entries))
     output = tmp_path / "catalog_output.db"
 
     assert _run(output) == 0
@@ -277,7 +283,7 @@ def test_pipeline_isolates_item_failure_and_logs_it(
             raise RuntimeError("injected item failure")
         original_process(self, entry, record_index, report)
 
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(entries))
     monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", fail_one_item)
     output = tmp_path / "catalog_output.db"
 
@@ -362,7 +368,7 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
             self.repositories._conn.execute(update(table).where(where).values({column: new_uuid()}))
 
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(entries))
     monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", violate_one_item)
     output = tmp_path / "catalog_output.db"
 
@@ -409,7 +415,7 @@ def test_pipeline_aborts_before_feed_if_foreign_keys_cannot_be_enabled(
             statement = "PRAGMA foreign_keys"
         return original_exec(self, statement, *args, **kwargs)
 
-    def unexpected_feed(_url):
+    def unexpected_feed(_url, _source):
         nonlocal feed_requested
         feed_requested = True
         return iter(())
@@ -445,7 +451,7 @@ def test_pipeline_aborts_on_unrecognized_schema(
     empty = tmp_path / "empty.db"
     sqlite3.connect(empty).close()
 
-    def fake_download_to(url: str, dest_dir: Path) -> Path:
+    def fake_download_to(url: str, dest_dir: Path, source: object) -> Path:
         tmp = dest_dir / ".catalog-stub.db.tmp"
         shutil.copy(empty, tmp)
         return tmp
@@ -461,7 +467,7 @@ def test_pipeline_aborts_on_unrecognized_schema(
 # --------------------------------------------------------------------------- #
 def test_prepare_catalog_database_use_case(_stub_download: Path, tmp_path: Path) -> None:
     repository = SqliteCatalogRepository()
-    prepared = PrepareCatalogDatabaseUseCase(repository).execute(
+    prepared = PrepareCatalogDatabaseUseCase(repository, HttpByteSource()).execute(
         "https://example.com/catalog.db", tmp_path
     )
     try:

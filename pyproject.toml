@@ -13,6 +13,7 @@ dependencies = [
     "libinjection-python==1.1.6",
     "SQLAlchemy==2.0.36",
     "alembic==1.14.1",
+    "boto3==1.43.85",
 ]
 
 [project.scripts]
