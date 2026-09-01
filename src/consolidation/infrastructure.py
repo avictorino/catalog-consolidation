@@ -2,19 +2,22 @@
 outside the repositories.
 
 Everything that talks to something external or runs SQL against the connection:
-the HTTP catalog download, the streamed seller feed and its anti-corruption layer
-(``ProductEntry``), the SQL-injection screen, the concrete similarity backends,
-the Alembic wiring, the schema-refactor steps the Alembic revision executes
-(source classification + the staged rebuild), and ``SqliteCatalogRepository`` —
-the SQLite adapter for the ``CatalogRepository`` port the use cases depend on.
-Nothing here holds business rules.
+the catalog download and the streamed seller feed, the byte-stream transports the
+feed reads through (``HttpByteSource`` / ``S3ByteSource``, adapters for the
+``services.ByteSource`` port), the anti-corruption layer (``ProductEntry``), the
+SQL-injection screen, the concrete similarity backends, the Alembic wiring, the
+schema-refactor steps the Alembic revision executes (source classification + the
+staged rebuild), and ``SqliteCatalogRepository`` — the SQLite adapter for the
+``CatalogRepository`` port the use cases depend on. Nothing here holds business
+rules.
 
 The declarative table metadata itself stays in :mod:`consolidation.schema`;
 this module only *executes* against a database.
 
 Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
 :mod:`consolidation.repository`; plus requests / ijson / pydantic / libinjection /
-rapidfuzz / alembic / SQLAlchemy.
+rapidfuzz / alembic / SQLAlchemy. ``boto3`` is imported lazily, only when the S3
+transport is selected.
 """
 
 from __future__ import annotations
@@ -22,24 +25,31 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterator
+from contextlib import contextmanager
 from difflib import SequenceMatcher
+from functools import cached_property
 from pathlib import Path
 from typing import BinaryIO, Literal
+from urllib.parse import urlparse
 
 import ijson
 import libinjection
 import requests
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine, Transaction
 
 from consolidation.domain import ThreatFinding, new_uuid, normalize
 from consolidation.repository import CatalogRepositories
-from consolidation.services import Similarity
+from consolidation.services import ByteSource, Similarity
 
 logger = logging.getLogger("consolidation")
+
+# Same file cli.py resolves .env against (two levels up from this package).
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 _TIMEOUT = (10, 60)  # (connect, read) seconds
 _PROBE_SIZE = 64 * 1024
@@ -51,12 +61,93 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
 
 # --------------------------------------------------------------------------- #
+# Byte-stream transports for the ``services.ByteSource`` port. The **seller feed**
+# reads through one of these; the choice is made at the composition root and
+# injected, exactly like the similarity backend. (The catalog download stays on
+# plain ``requests`` — see ``download_to`` — so only the feed transport is
+# swappable.)
+# --------------------------------------------------------------------------- #
+class HttpByteSource:
+    """Stream an object over HTTP(S) with ``requests``."""
+
+    name = "http"
+
+    @contextmanager
+    def open(self, ref: str) -> Iterator[BinaryIO]:
+        with requests.get(ref, stream=True, timeout=_TIMEOUT) as response:
+            response.raise_for_status()
+            yield response.raw
+
+
+class _S3ReadAdapter:
+    """Wrap a botocore ``StreamingBody`` so ``read(-1)`` / ``read()`` mean "read the
+    rest" — the contract :class:`_PrefixedReader` and ``ijson`` rely on."""
+
+    def __init__(self, body: object) -> None:
+        self._body = body
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            return self._body.read()
+        return self._body.read(size)
+
+
+class S3ByteSource:
+    """Stream a **public** S3 object anonymously with ``boto3`` ``get_object``.
+
+    Accepts ``s3://bucket/key`` or a virtual-hosted / path-style
+    ``https://…amazonaws.com/…`` reference. The request is unsigned, so the object
+    must be publicly readable — no credentials are resolved or required.
+    """
+
+    name = "s3"
+
+    @contextmanager
+    def open(self, ref: str) -> Iterator[BinaryIO]:
+        import boto3
+        from botocore import UNSIGNED
+        from botocore.config import Config
+
+        bucket, key = parse_s3_ref(ref)
+        client = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+        body = client.get_object(Bucket=bucket, Key=key)["Body"]
+        try:
+            yield _S3ReadAdapter(body)
+        finally:
+            body.close()
+
+
+def parse_s3_ref(ref: str) -> tuple[str, str]:
+    """``(bucket, key)`` from ``s3://b/k`` or an ``…amazonaws.com`` HTTP(S) URL."""
+    parsed = urlparse(ref)
+    if parsed.scheme == "s3":
+        return parsed.netloc, parsed.path.lstrip("/")
+    if parsed.scheme in ("http", "https") and parsed.netloc.endswith("amazonaws.com"):
+        host, path = parsed.netloc, parsed.path.lstrip("/")
+        if host.startswith(("s3.", "s3-")):  # path-style: s3.<region>.amazonaws.com/<bucket>/<key>
+            bucket, _, key = path.partition("/")
+            return bucket, key
+        return host.split(".s3", 1)[0], path  # virtual-hosted: <bucket>.s3.<region>.amazonaws.com/…
+    raise ValueError(f"not an S3 reference: {ref!r}")
+
+
+def build_source(name: str) -> ByteSource:
+    """Build a byte-stream transport; ``boto3`` is imported only for the S3 path."""
+    if name == "http":
+        return HttpByteSource()
+    if name == "s3":
+        return S3ByteSource()
+    raise ValueError(f"unknown source: {name!r} (options: http, s3)")
+
+
+# --------------------------------------------------------------------------- #
 # Catalog download
 # --------------------------------------------------------------------------- #
 def download_to(url: str, dest_dir: Path) -> Path:
     """Stream ``url`` in chunks into a fresh temp file inside ``dest_dir``.
 
     The response body is never held whole in memory. Returns the temp file path.
+    Always plain ``requests`` — the swappable transport is the feed's, not this.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest_dir / f".catalog-{uuid.uuid4().hex}.db.tmp"
@@ -183,12 +274,11 @@ def iter_entries(stream: BinaryIO) -> Iterator[ProductEntry]:
         raise FeedError(f"invalid JSON feed: {exc}") from exc
 
 
-def iter_feed(url: str) -> Iterator[ProductEntry]:
+def iter_feed(url: str, source: ByteSource) -> Iterator[ProductEntry]:
     """Stream and parse a remote seller feed without downloading it locally."""
-    logger.info("streaming seller feed url=%s", url)
-    with requests.get(url, stream=True, timeout=_TIMEOUT) as response:
-        response.raise_for_status()
-        yield from iter_entries(response.raw)
+    logger.info("streaming seller feed url=%s via=%s", url, source.name)
+    with source.open(url) as stream:
+        yield from iter_entries(stream)
 
 
 # --------------------------------------------------------------------------- #
@@ -222,18 +312,54 @@ def screen_entry(entry: ProductEntry, record_index: int) -> ThreatFinding | None
 
 # --------------------------------------------------------------------------- #
 # Concrete similarity backends for the ``services.Similarity`` port.
+#
+# The fuzzy cutoff is not a parameter threaded through the app: it lives in
+# ``.env`` (``THRESHOLD``) and is read here, lazily, the first time a backend
+# needs it — falling back to the backend's ``suggested_threshold``.
 # --------------------------------------------------------------------------- #
-class DifflibSimilarity:
-    name = "difflib"
+def _configured_threshold(default: float) -> float:
+    raw = dotenv_values(_ENV_PATH).get("THRESHOLD")
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"THRESHOLD must be a float in [0, 1], got: {raw!r}") from exc
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"THRESHOLD must be in [0, 1], got: {value}")
+    return value
+
+
+class _Similarity:
+    """Shared threshold resolution for the concrete backends.
+
+    ``threshold`` is resolved once, on first access: an explicit value passed to
+    the constructor (used by tests) wins, otherwise ``THRESHOLD`` from ``.env``,
+    otherwise ``suggested_threshold``.
+    """
+
+    name: str
     suggested_threshold = 0.90
+
+    def __init__(self, threshold: float | None = None) -> None:
+        self._threshold_override = threshold
+
+    @cached_property
+    def threshold(self) -> float:
+        if self._threshold_override is not None:
+            return self._threshold_override
+        return _configured_threshold(self.suggested_threshold)
+
+
+class DifflibSimilarity(_Similarity):
+    name = "difflib"
 
     def score(self, a: str, b: str) -> float:
         return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
-class RapidFuzzSimilarity:
+class RapidFuzzSimilarity(_Similarity):
     name = "rapidfuzz"
-    suggested_threshold = 0.90
 
     def score(self, a: str, b: str) -> float:
         from rapidfuzz import fuzz

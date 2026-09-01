@@ -13,6 +13,7 @@ from consolidation import infrastructure, schema, usecase
 from consolidation.domain import new_uuid
 from consolidation.infrastructure import (
     DifflibSimilarity,
+    HttpByteSource,
     ProductEntry,
     SqliteCatalogRepository,
 )
@@ -164,7 +165,7 @@ def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
         return tmp
 
     monkeypatch.setattr(usecase, "download_to", fake_download_to)
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(()))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(()))
     return legacy_db
 
 
@@ -176,13 +177,15 @@ def _run(output: Path, *, threshold: float = 0.90) -> int:
     """Wire the use cases the way ``cli.main`` does: prepare, then consolidate."""
     output = Path(output)
     repository = SqliteCatalogRepository()
-    resolver = ProductIdentityResolver(DifflibSimilarity(), threshold)
+    resolver = ProductIdentityResolver(DifflibSimilarity(threshold))
     try:
         prepared = PrepareCatalogDatabaseUseCase(repository).execute(_CATALOG_URL, output.parent)
     except Exception:
         logging.getLogger("consolidation").exception("run failed")
         return 1
-    return ConsolidateCatalogUseCase(repository, resolver).execute(prepared, _PRODUCTS_URL, output)
+    return ConsolidateCatalogUseCase(repository, resolver, HttpByteSource()).execute(
+        prepared, _PRODUCTS_URL, output
+    )
 
 
 def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Path) -> None:
@@ -226,7 +229,7 @@ def test_pipeline_imports_feed(
             }
         ),
     ]
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(entries))
     output = tmp_path / "catalog_output.db"
 
     assert _run(output) == 0
@@ -277,7 +280,7 @@ def test_pipeline_isolates_item_failure_and_logs_it(
             raise RuntimeError("injected item failure")
         original_process(self, entry, record_index, report)
 
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(entries))
     monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", fail_one_item)
     output = tmp_path / "catalog_output.db"
 
@@ -362,7 +365,7 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
             self.repositories._conn.execute(update(table).where(where).values({column: new_uuid()}))
 
-    monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
+    monkeypatch.setattr(usecase, "iter_feed", lambda _url, _source: iter(entries))
     monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", violate_one_item)
     output = tmp_path / "catalog_output.db"
 
@@ -409,7 +412,7 @@ def test_pipeline_aborts_before_feed_if_foreign_keys_cannot_be_enabled(
             statement = "PRAGMA foreign_keys"
         return original_exec(self, statement, *args, **kwargs)
 
-    def unexpected_feed(_url):
+    def unexpected_feed(_url, _source):
         nonlocal feed_requested
         feed_requested = True
         return iter(())
@@ -494,7 +497,7 @@ def test_consolidate_feed_use_case_links_into_prepared_db(migrated_db: Path) -> 
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys = ON")
             report = ConsolidateFeedUseCase(
-                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(0.90))
             ).execute(iter(entries))
     finally:
         engine.dispose()

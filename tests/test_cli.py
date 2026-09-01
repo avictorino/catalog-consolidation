@@ -7,13 +7,13 @@ import pytest
 
 from consolidation import cli
 
-ENV_KEYS = ("CATALOG_URL", "PRODUCTS_URL", "OUTPUT", "MATCHER", "THRESHOLD")
+ENV_KEYS = ("CATALOG_URL", "PRODUCTS_URL", "OUTPUT", "SOURCE", "MATCHER")
 FULL_ENV = {
     "CATALOG_URL": "https://example.com/catalog.db",
     "PRODUCTS_URL": "https://example.com/ProductEntry.json",
     "OUTPUT": "catalog_output.db",
+    "SOURCE": "http",
     "MATCHER": "rapidfuzz",
-    "THRESHOLD": "0.90",
 }
 
 
@@ -51,17 +51,16 @@ def test_resolves_from_env_file(env_file: Path) -> None:
         "catalog_url": "https://example.com/catalog.db",
         "products_url": "https://example.com/ProductEntry.json",
         "output": Path("catalog_output.db").resolve(),
+        "source": "http",
         "matcher": "rapidfuzz",
-        "threshold": pytest.approx(0.90),
     }
 
 
 def test_cli_flag_overrides_env(env_file: Path) -> None:
-    _write_env(env_file, FULL_ENV)
-    args = cli._build_parser().parse_args(["--matcher", "rapidfuzz", "--threshold", "0.5"])
+    _write_env(env_file, {**FULL_ENV, "MATCHER": "difflib"})
+    args = cli._build_parser().parse_args(["--matcher", "rapidfuzz"])
     config = cli._resolve(args)
     assert config["matcher"] == "rapidfuzz"
-    assert config["threshold"] == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("missing", ENV_KEYS)
@@ -105,14 +104,61 @@ def test_non_tls_url_warns(env_file: Path, caplog: pytest.LogCaptureFixture) -> 
     assert any("non-TLS" in r.message for r in caplog.records)
 
 
-@pytest.mark.parametrize("bad", ["1.5", "-0.1", "nope"])
-def test_bad_threshold_rejected(env_file: Path, bad: str) -> None:
-    _write_env(env_file, {**FULL_ENV, "THRESHOLD": bad})
+def test_unknown_matcher_in_env_rejected(env_file: Path) -> None:
+    _write_env(env_file, {**FULL_ENV, "MATCHER": "fuzzywuzzy"})
     with pytest.raises(cli._ConfigError):
         cli._resolve(cli._build_parser().parse_args([]))
 
 
-def test_unknown_matcher_in_env_rejected(env_file: Path) -> None:
-    _write_env(env_file, {**FULL_ENV, "MATCHER": "fuzzywuzzy"})
-    with pytest.raises(cli._ConfigError):
+def test_unknown_source_rejected(env_file: Path) -> None:
+    _write_env(env_file, {**FULL_ENV, "SOURCE": "ftp"})
+    with pytest.raises(cli._ConfigError, match="source must be one of"):
+        cli._resolve(cli._build_parser().parse_args([]))
+
+
+def test_s3_source_only_affects_the_feed_url(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {
+            **FULL_ENV,
+            "SOURCE": "s3",
+            "CATALOG_URL": "https://example.com/catalog.db",  # still plain HTTP(S)
+            "PRODUCTS_URL": "s3://bucket/ProductEntry.json",
+        },
+    )
+    config = cli._resolve(cli._build_parser().parse_args([]))
+    assert config["source"] == "s3"
+    assert config["catalog_url"] == "https://example.com/catalog.db"
+    assert config["products_url"] == "s3://bucket/ProductEntry.json"
+
+
+def test_s3_source_rewrites_amazonaws_feed_url_to_s3_scheme(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {
+            **FULL_ENV,
+            "SOURCE": "s3",
+            "PRODUCTS_URL": "https://s3.us-east-1.amazonaws.com/engineering-hiring-process/ProductEntry.json",
+        },
+    )
+    config = cli._resolve(cli._build_parser().parse_args([]))
+    assert config["catalog_url"] == "https://example.com/catalog.db"  # untouched
+    assert config["products_url"] == "s3://engineering-hiring-process/ProductEntry.json"
+
+
+def test_s3_source_rejects_non_s3_feed_url(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {**FULL_ENV, "SOURCE": "s3", "PRODUCTS_URL": "http://bucket/ProductEntry.json"},
+    )
+    with pytest.raises(cli._ConfigError, match="s3:// or amazonaws.com URL"):
+        cli._resolve(cli._build_parser().parse_args([]))
+
+
+def test_s3_source_still_validates_catalog_url_as_http(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {**FULL_ENV, "SOURCE": "s3", "CATALOG_URL": "s3://bucket/catalog.db"},
+    )
+    with pytest.raises(cli._ConfigError, match="catalog-url must be an http"):
         cli._resolve(cli._build_parser().parse_args([]))

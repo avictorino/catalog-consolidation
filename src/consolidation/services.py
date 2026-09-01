@@ -11,20 +11,43 @@ Depends on: :mod:`consolidation.domain`.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 from consolidation.domain import Catalog, Product, Submission, brands_compatible, normalize
 
 
 class Similarity(Protocol):
-    """Port: an interchangeable string-similarity backend (difflib / rapidfuzz)."""
+    """Port: an interchangeable string-similarity backend (difflib / rapidfuzz).
+
+    ``threshold`` is the effective fuzzy cutoff the backend resolved for itself
+    (from ``THRESHOLD`` in ``.env``, falling back to ``suggested_threshold``) —
+    nothing upstream of the backend threads a threshold value.
+    """
 
     name: str
     suggested_threshold: float
+    threshold: float
 
     def score(self, a: str, b: str) -> float:
         """Return a score in the inclusive range [0, 1] for two normalized strings."""
+
+
+class ByteSource(Protocol):
+    """Port: open a readable byte stream for a reference (URL / URI).
+
+    One transport per backend, chosen at the composition root and injected into
+    the use cases the same way :class:`Similarity` is. Concrete adapters live in
+    :mod:`consolidation.infrastructure` (``HttpByteSource``, ``S3ByteSource``);
+    both the catalog download and the seller feed read through this port, so the
+    use cases never import ``requests`` or ``boto3``.
+    """
+
+    name: str
+
+    def open(self, ref: str) -> AbstractContextManager[BinaryIO]:
+        """Context manager yielding a binary stream positioned at the start of ``ref``."""
 
 
 def _digit_tokens(value: str) -> Counter[str]:
@@ -35,7 +58,6 @@ def _fuzzy_eligible(
     submission: Submission,
     product: Product,
     similarity: Similarity,
-    threshold: float,
 ) -> tuple[bool, float]:
     entry_name = normalize(submission.Name)
     product_name = product.normalized_name
@@ -46,14 +68,13 @@ def _fuzzy_eligible(
     if _digit_tokens(entry_name) != _digit_tokens(product_name):
         return False, 0.0
     score = similarity.score(entry_name, product_name)
-    return score >= threshold, score
+    return score >= similarity.threshold, score
 
 
 def resolve_product(
     catalog: Catalog,
     submission: Submission,
     similarity: Similarity,
-    threshold: float,
 ) -> tuple[Product | None, str | None, float | None]:
     """Resolve a submission to exactly one product.
 
@@ -93,7 +114,7 @@ def resolve_product(
 
     candidates: list[tuple[Product, float]] = []
     for product in catalog.products:
-        eligible, score = _fuzzy_eligible(submission, product, similarity, threshold)
+        eligible, score = _fuzzy_eligible(submission, product, similarity)
         if eligible:
             candidates.append((product, score))
 
@@ -129,14 +150,11 @@ class Resolution:
 class ProductIdentityResolver:
     """Domain service: given the catalog, decide what a submission refers to."""
 
-    def __init__(self, similarity: Similarity, threshold: float) -> None:
+    def __init__(self, similarity: Similarity) -> None:
         self.similarity = similarity
-        self.threshold = threshold
 
     def resolve(self, catalog: Catalog, submission: Submission) -> Resolution:
-        product, reason, score = resolve_product(
-            catalog, submission, self.similarity, self.threshold
-        )
+        product, reason, score = resolve_product(catalog, submission, self.similarity)
         return Resolution(product, reason, score)
 
 

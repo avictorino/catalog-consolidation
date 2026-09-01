@@ -32,6 +32,7 @@ logger = logging.getLogger("consolidation")
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 MATCHERS = ("difflib", "rapidfuzz")
+SOURCES = ("http", "s3")
 
 
 _LEVEL_COLOR = {
@@ -78,13 +79,48 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="destination path for the consolidated database")
     # Validate in _resolve so invalid CLI values go through the same logged error path
     # as invalid values loaded from .env.
+    parser.add_argument("--source", help="seller-feed byte-stream transport: http or s3")
     parser.add_argument("--matcher", help="similarity backend")
-    parser.add_argument("--threshold", help="fuzzy cutoff, a float in [0, 1]")
     return parser
 
 
 class _ConfigError(Exception):
     """A required option is missing or invalid."""
+
+
+def _require_http_url(name: str, url: str) -> None:
+    """Accept an ``https://`` URL, warn on ``http://``, reject anything else."""
+    scheme = urlparse(url).scheme
+    if scheme == "http":
+        logger.warning("non-TLS URL key=%s url=%s", name, url)
+    elif scheme != "https":
+        raise _ConfigError(f"{name} must be an http(s) URL, got: {url!r}")
+
+
+def _resolve_urls(catalog_url: str, products_url: str, source: str) -> tuple[str, str]:
+    """Validate the two input URLs for the chosen transport.
+
+    The catalog download is always plain HTTP(S). Only the seller feed honours
+    ``--source``: under ``s3`` the feed URL must be an ``s3://`` or
+    ``…amazonaws.com`` reference, and an HTTP(S) one is rewritten to
+    ``s3://bucket/key``. Returns the (possibly rewritten) ``(catalog_url, products_url)``.
+    """
+    _require_http_url("catalog-url", catalog_url)
+    if source != "s3":
+        _require_http_url("products-url", products_url)
+        return catalog_url, products_url
+
+    try:
+        bucket, key = infrastructure.parse_s3_ref(products_url)
+    except ValueError as exc:
+        raise _ConfigError(
+            f"products-url must be an s3:// or amazonaws.com URL when source=s3, "
+            f"got: {products_url!r}"
+        ) from exc
+    rewritten = f"s3://{bucket}/{key}"
+    if rewritten != products_url:
+        logger.info("rewrote products-url for source=s3 url=%s -> %s", products_url, rewritten)
+    return catalog_url, rewritten
 
 
 def _resolve(args: argparse.Namespace) -> dict[str, object]:
@@ -100,32 +136,23 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     catalog_url = pick("catalog-url")
     products_url = pick("products-url")
     output = pick("output")
+    source = pick("source")
     matcher = pick("matcher")
-    threshold_raw = pick("threshold")
 
-    for name, url in (("catalog-url", catalog_url), ("products-url", products_url)):
-        scheme = urlparse(url).scheme
-        if scheme == "http":
-            logger.warning("non-TLS URL key=%s url=%s", name, url)
-        elif scheme != "https":
-            raise _ConfigError(f"{name} must be an http(s) URL, got: {url!r}")
+    if source not in SOURCES:
+        raise _ConfigError(f"source must be one of {SOURCES}, got: {source!r}")
+
+    catalog_url, products_url = _resolve_urls(catalog_url, products_url, source)
 
     if matcher not in MATCHERS:
         raise _ConfigError(f"matcher must be one of {MATCHERS}, got: {matcher!r}")
-
-    try:
-        threshold = float(threshold_raw)
-    except ValueError as exc:
-        raise _ConfigError(f"threshold must be a float, got: {threshold_raw!r}") from exc
-    if not 0.0 <= threshold <= 1.0:
-        raise _ConfigError(f"threshold must be in [0, 1], got: {threshold}")
 
     return {
         "catalog_url": catalog_url,
         "products_url": products_url,
         "output": Path(output).resolve(),
+        "source": source,
         "matcher": matcher,
-        "threshold": threshold,
     }
 
 
@@ -138,18 +165,18 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("invalid configuration: %s", exc)
         return 2
     logger.info(
-        "configuration catalog_url=%s products_url=%s output=%s matcher=%s threshold=%s",
+        "configuration catalog_url=%s products_url=%s output=%s source=%s matcher=%s",
         config["catalog_url"],
         config["products_url"],
         config["output"],
+        config["source"],
         config["matcher"],
-        config["threshold"],
     )
-    # Composition root: build the collaborators once (the resolver already carries
-    # the similarity backend and the threshold), then run the use cases in order.
-    resolver = ProductIdentityResolver(
-        infrastructure.build_similarity(config["matcher"]), config["threshold"]
-    )
+    # Composition root: build the collaborators once (the similarity backend
+    # resolves its own threshold from .env, lazily, on first use), then run the
+    # use cases in order.
+    resolver = ProductIdentityResolver(infrastructure.build_similarity(config["matcher"]))
+    source = infrastructure.build_source(config["source"])  # seller-feed transport only
     repository = infrastructure.SqliteCatalogRepository()
     output = config["output"]
     try:
@@ -159,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         logger.exception("run failed")
         return 1
-    return usecase.ConsolidateCatalogUseCase(repository, resolver).execute(
+    return usecase.ConsolidateCatalogUseCase(repository, resolver, source).execute(
         prepared, config["products_url"], output
     )
 
