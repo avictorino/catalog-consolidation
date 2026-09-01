@@ -1,13 +1,16 @@
 """Interface layer — the command-line entry point and composition root.
 
-``python -m consolidation.cli`` resolves configuration and calls the
-:func:`consolidation.usecase.run` use case. Configuration is deliberately small:
-every option comes from ``.env`` (looked up next to this package, so it is found
-from any working directory), and a CLI flag overrides its ``.env`` value. If an
-option is set in neither place the run is invalid — an error is logged and the
-process exits non-zero. There are no built-in fallbacks.
+``python -m consolidation.cli`` resolves configuration, picks the concrete
+adapters (similarity backend, ``SqliteCatalogRepository``), then wires the use
+cases: ``PrepareCatalogDatabaseUseCase`` to get a database ready, then
+``ConsolidateCatalogUseCase`` to consume the feed and publish.
 
-Depends on: :mod:`consolidation.usecase`.
+Configuration is deliberately small: every option comes from ``.env`` (looked up
+next to this package, so it is found from any working directory), and a CLI flag
+overrides its ``.env`` value. If an option is set in neither place the run is
+invalid — an error is logged and the process exits non-zero.
+
+Depends on: :mod:`consolidation.usecase`, :mod:`consolidation.infrastructure`.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from urllib.parse import urlparse
 from dotenv import dotenv_values
 
 from consolidation import infrastructure, usecase
+from consolidation.services import ProductIdentityResolver
 
 logger = logging.getLogger("consolidation")
 
@@ -92,7 +96,7 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     return {
         "catalog_url": catalog_url,
         "products_url": products_url,
-        "output": output,
+        "output": Path(output).resolve(),
         "matcher": matcher,
         "threshold": threshold,
     }
@@ -114,16 +118,23 @@ def main(argv: list[str] | None = None) -> int:
         config["matcher"],
         config["threshold"],
     )
-    # Composition root: build the injected similarity backend here, then hand the
-    # use case a ready instance (it never touches the factory itself).
-    similarity = infrastructure.build_similarity(config["matcher"])
-    return usecase.ConsolidateCatalogUseCase(
-        catalog_url=config["catalog_url"],
-        products_url=config["products_url"],
-        output=config["output"],
-        similarity=similarity,
-        threshold=config["threshold"],
-    ).execute()
+    # Composition root: build the collaborators once (the resolver already carries
+    # the similarity backend and the threshold), then run the use cases in order.
+    resolver = ProductIdentityResolver(
+        infrastructure.build_similarity(config["matcher"]), config["threshold"]
+    )
+    repository = infrastructure.SqliteCatalogRepository()
+    output = config["output"]
+    try:
+        prepared = usecase.PrepareCatalogDatabaseUseCase(repository).execute(
+            config["catalog_url"], output.parent
+        )
+    except Exception:
+        logger.exception("run failed")
+        return 1
+    return usecase.ConsolidateCatalogUseCase(repository, resolver).execute(
+        prepared, config["products_url"], output
+    )
 
 
 if __name__ == "__main__":

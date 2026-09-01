@@ -23,8 +23,7 @@ An expected successful run has the following shape. Timestamps, UUIDs, and tempo
 paths vary between executions:
 
 ```text
-HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=catalog_output.db matcher=rapidfuzz threshold=0.9
-HH:MM:SS [INFO] run config products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json matcher=rapidfuzz threshold=0.9
+HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db matcher=rapidfuzz threshold=0.9
 HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<temporary catalog path>.db.tmp
 HH:MM:SS [INFO] download complete bytes=61440
 HH:MM:SS [INFO] source classified as=legacy
@@ -35,6 +34,8 @@ HH:MM:SS [INFO] rebuilt Product rows=975
 HH:MM:SS [INFO] rebuilt SellerProduct sellers=0 links=0
 HH:MM:SS [INFO] schema refactor committed
 HH:MM:SS [INFO] foreign key enforcement enabled
+HH:MM:SS [INFO] catalog database prepared path=<temporary catalog path>.db.tmp
+HH:MM:SS [INFO] run config products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json matcher=rapidfuzz threshold=0.9
 HH:MM:SS [INFO] catalog loaded products=975
 HH:MM:SS [INFO] streaming seller feed url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json
 HH:MM:SS [INFO] first feed record received
@@ -81,6 +82,37 @@ catalog before publication.
 - [`spec/contract.md`](spec/contract.md) — IO contract, CLI, validation, logging, and the normative refactor / matcher rules.
 - [`spec/acceptance.md`](spec/acceptance.md) — acceptance criteria and test scenarios.
 
+## Architecture
+
+A small, educational DDD layering — one module per layer (details and diagrams in
+[`docs/arquitetura.md`](docs/arquitetura.md)):
+
+| Module | Layer | Responsibility |
+| --- | --- | --- |
+| `domain.py` | domain | normalization, `Product` / `Catalog` entities, the `Submission` contract — no I/O, no project imports |
+| `services.py` | domain services / ports | `ProductIdentityResolver` (the identity rules) and the `Similarity` port |
+| `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories` — the only code that touches the DB connection (`load_catalog`, `entry_transaction()`, `reload()`) |
+| `schema.py` | persistence schema | SQLAlchemy `Table` metadata only |
+| `infrastructure.py` | infrastructure | HTTP download, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, and `SqliteCatalogRepository` |
+| `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, the `ConsolidateCatalogUseCase` coordinator, and the `CatalogRepository` port |
+| `cli.py` | interface / composition root | resolves config, builds the resolver + repository, runs the two use cases in order |
+
+Dependencies point inward: `cli → usecase → services → domain`, with `repository`
+and `infrastructure` implementing the ports the use cases declare. `domain.py`
+imports nothing from the project; `schema.py` has no function that takes a
+`Connection`; raw `conn.begin/commit/rollback/execute` lives **only** inside
+`repository.py` and the `SqliteCatalogRepository` adapter.
+
+`cli.py` injects exactly two collaborators: one `CatalogRepository` (prepares the
+database, then hands out the `CatalogRepositories` bundle) and one
+`ProductIdentityResolver` (carrying the similarity backend and the threshold) —
+nothing threads `similarity` or `threshold` from layer to layer.
+
+Run flow: `cli` resolves config → `PrepareCatalogDatabaseUseCase` downloads and
+migrates `catalog.db`, leaving the repository connected with foreign keys on →
+`ConsolidateCatalogUseCase` streams the feed through `ConsolidateFeedUseCase`
+(one transaction per entry) and publishes the output atomically on success.
+
 ## Inputs and output
 
 | What | Default source |
@@ -126,10 +158,10 @@ python -m consolidation.cli \
 ### Why `rapidfuzz` is the default
 
 Product names can contain the same words in a different order, for example
-`Smartphone Galaxy S23` and `Galaxy S23 Smartphone`. The importer therefore resolves
-exact normalized names and equal word multisets before it invokes fuzzy matching. This
-deterministic step is what handles word order; neither fuzzy backend should be trusted
-to infer that relationship by itself.
+`Smartphone Galaxy S23` and `Galaxy S23 Smartphone`. `ProductIdentityResolver`
+therefore resolves exact normalized names and equal word multisets before it invokes
+fuzzy matching. This deterministic step is what handles word order; neither fuzzy
+backend should be trusted to infer that relationship by itself.
 
 `difflib.SequenceMatcher` is sensitive to character sequence and can be quadratic for
 long strings. It is useful as a dependency-free comparison backend, but it is slower
@@ -173,18 +205,19 @@ guarantee — the remote content may change.
 
 | Decision | Choice | Rationale |
 | --- | --- | --- |
+| Application structure | seven layer modules (domain / services / repository / schema / infrastructure / usecase / cli); a `CatalogRepository` port for the database and a `Similarity` port for the matcher; the composition root injects two ready collaborators | testable use cases, the domain has no I/O imports, the raw connection stays inside the repository layer; see [`docs/arquitetura.md`](docs/arquitetura.md) |
 | Database model | on every run, migrate the given DB: extract `Brand`, `Category` (reference tables) and `Seller`; `Product` has one nullable `BrandId`, `ProductCategory` stores category memberships, and `SellerProduct` stores seller links | the given model denormalizes `SellerName`, `Brand`, `Category` and mistypes the SKU; the challenge allows DB changes |
 | Primary keys | `uuid4` stored as `TEXT`, minted in Python; no `AUTOINCREMENT` | non-enumerable, no DB coordination to mint, stable across environments; accepted cost: larger indexes, worse insert locality |
 | `Brand` / `Category` cardinality | nullable `Product.BrandId` FK for one brand; `ProductCategory (ProductId, CategoryId)` for many categories | brand is singular, while category is taxonomy membership and may contain several values |
 | Keep the seller SKU | `SellerProduct.ExternalSku` (opaque text) + `UNIQUE (SellerId, ExternalSku)` | needed to map a listing back to the seller's catalog; reuse is only across sellers |
-| DB access | SQLAlchemy Core (no ORM) + one Alembic revision | declarative schema + parameterized statements; the refactor runs in a setup transaction; foreign keys are enabled and verified before JSON import |
+| DB access | SQLAlchemy Core (no ORM) + one Alembic revision, all behind `repository.py` and the `SqliteCatalogRepository` adapter | declarative schema + parameterized statements; the connection is private to the repository layer; the refactor runs in a setup transaction; foreign keys are enabled and verified before JSON import |
 | Conditional migration | keyed on `alembic_version`: revision `0001` for a legacy source, no-op for an already-migrated DB | idempotent feed writes make incremental re-runs against a previous output safe |
 | Product identity | normalized `Name`, then identical word multisets regardless of order, then gated fuzzy matching; brand compatibility required; category and feed `Id` never define identity | preserve repeated words and model/capacity tokens; skip ambiguous matches; `Id` is a seller SKU |
 | Normalization | Python, shared by catalog / feed names, brands, categories | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
-| Matcher backends | `rapidfuzz` by default; `difflib` remains available through the same `score()` contract | optimized fuzzy scoring without changing the matching rules; no DI container |
+| Matcher backends | `rapidfuzz` by default; `difflib` remains available through the same `score()` contract | optimized fuzzy scoring without changing the matching rules; the backend is one of two ports (`Similarity`), wrapped with the threshold in a `ProductIdentityResolver` and injected at the CLI — no framework |
 | Ambiguous match | skip the row and report it, do not abort the import | one ambiguous row should not hide the outcome of the rest |
-| Transaction | schema refactor is committed first; one transaction per feed entry | failed entries roll back in isolation, later entries continue, and failures are reported |
+| Transaction | schema refactor is committed first (`PrepareCatalogDatabaseUseCase`); then one transaction per feed entry via `CatalogRepositories.entry_transaction()` | failed entries roll back in isolation, the cache is reloaded, later entries continue, and failures are reported |
 
 ## Known limitations
 

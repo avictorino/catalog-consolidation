@@ -137,6 +137,6 @@ Verify:
 
 - Exit code `0` only after publication; non-zero on any failure. Contained threats and
   skips keep the exit code at `0`.
-- The final summary reports `processed`, `new`, `linked`, `skipped`, `threat`.
+- The final summary reports `processed`, `new`, `linked`, `skipped`, `threat`, `failed`.
 - When `threat > 0`, a summary `WARNING` restates the count.
 - Two runs from the same sources produce logically equivalent tables.

@@ -6,12 +6,23 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import create_engine, update
 from sqlalchemy.engine import Connection
 
 from consolidation import infrastructure, schema, usecase
 from consolidation.domain import new_uuid
-from consolidation.infrastructure import DifflibSimilarity, ProductEntry
+from consolidation.infrastructure import (
+    DifflibSimilarity,
+    ProductEntry,
+    SqliteCatalogRepository,
+)
+from consolidation.repository import CatalogRepositories
+from consolidation.services import ProductIdentityResolver
+from consolidation.usecase import (
+    ConsolidateCatalogUseCase,
+    ConsolidateFeedUseCase,
+    PrepareCatalogDatabaseUseCase,
+)
 
 from .conftest import BRAND_ROWS, CATEGORY_ROWS, PRODUCT_ROWS, apply_refactor
 
@@ -157,19 +168,26 @@ def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
     return legacy_db
 
 
-def _config(output: Path) -> dict[str, object]:
-    return {
-        "catalog_url": "https://example.com/catalog.db",
-        "products_url": "https://example.com/ProductEntry.json",
-        "output": output,
-        "similarity": DifflibSimilarity(),
-        "threshold": 0.90,
-    }
+_CATALOG_URL = "https://example.com/catalog.db"
+_PRODUCTS_URL = "https://example.com/ProductEntry.json"
+
+
+def _run(output: Path, *, threshold: float = 0.90) -> int:
+    """Wire the use cases the way ``cli.main`` does: prepare, then consolidate."""
+    output = Path(output)
+    repository = SqliteCatalogRepository()
+    resolver = ProductIdentityResolver(DifflibSimilarity(), threshold)
+    try:
+        prepared = PrepareCatalogDatabaseUseCase(repository).execute(_CATALOG_URL, output.parent)
+    except Exception:
+        logging.getLogger("consolidation").exception("run failed")
+        return 1
+    return ConsolidateCatalogUseCase(repository, resolver).execute(prepared, _PRODUCTS_URL, output)
 
 
 def test_pipeline_publishes_refactored_output(_stub_download: Path, tmp_path: Path) -> None:
     output = tmp_path / "out" / "catalog_output.db"
-    assert usecase.ConsolidateCatalogUseCase(**_config(output)).execute() == 0
+    assert _run(output) == 0
     assert output.exists()
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _rows(output, "PRAGMA foreign_key_check") == []
@@ -211,7 +229,7 @@ def test_pipeline_imports_feed(
     monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
     output = tmp_path / "catalog_output.db"
 
-    assert usecase.ConsolidateCatalogUseCase(**_config(output)).execute() == 0
+    assert _run(output) == 0
     assert _count(output, "Product") == PRODUCT_ROWS
     assert _count(output, "Seller") == 1
     assert _count(output, "SellerProduct") == 1
@@ -264,7 +282,7 @@ def test_pipeline_isolates_item_failure_and_logs_it(
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.ERROR, logger="consolidation"):
-        result = usecase.ConsolidateCatalogUseCase(**_config(output)).execute()
+        result = _run(output)
 
     assert result == 1
     assert output.exists()
@@ -326,14 +344,14 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
     enforcement = []
 
     def violate_one_item(self, entry, record_index, report) -> None:
-        enforcement.append(self.repositories.conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
+        enforcement.append(self.repositories._conn.exec_driver_sql("PRAGMA foreign_keys").scalar())
         original_process(self, entry, record_index, report)
         if record_index == 1:
             table = schema.metadata.tables[table_name]
             if table_name == "Product":
                 where = table.c.Name == entry.Name
             elif table_name == "ProductCategory":
-                product_id = self.repositories.conn.scalar(
+                product_id = self.repositories._conn.scalar(
                     schema.Product.select()
                     .with_only_columns(schema.Product.c.Id)
                     .where(schema.Product.c.Name == entry.Name)
@@ -342,14 +360,14 @@ def test_pipeline_enforces_foreign_keys_and_rolls_back_failed_item(
             else:
                 where = table.c.ExternalSku == entry.Id
             # Fail after all item writes, exercising real SQLite enforcement and rollback.
-            self.repositories.conn.execute(update(table).where(where).values({column: new_uuid()}))
+            self.repositories._conn.execute(update(table).where(where).values({column: new_uuid()}))
 
     monkeypatch.setattr(usecase, "iter_feed", lambda _url: iter(entries))
     monkeypatch.setattr(usecase.ConsolidateEntryUseCase, "process", violate_one_item)
     output = tmp_path / "catalog_output.db"
 
     with caplog.at_level(logging.INFO, logger="consolidation"):
-        result = usecase.ConsolidateCatalogUseCase(**_config(output)).execute()
+        result = _run(output)
 
     assert result == 1
     assert enforcement == [1, 1, 1]
@@ -399,7 +417,7 @@ def test_pipeline_aborts_before_feed_if_foreign_keys_cannot_be_enabled(
     monkeypatch.setattr(Connection, "exec_driver_sql", ignore_enabling)
     monkeypatch.setattr(usecase, "iter_feed", unexpected_feed)
 
-    assert usecase.ConsolidateCatalogUseCase(**_config(output)).execute() == 1
+    assert _run(output) == 1
     assert not feed_requested
     assert "foreign key enforcement could not be enabled" in caplog.text
     assert output.read_bytes() == b"previous output"
@@ -416,7 +434,7 @@ def test_pipeline_rollback_preserves_previous_output(
         raise RuntimeError("injected failure after pending inserts")
 
     monkeypatch.setattr(infrastructure, "foreign_key_check", boom)
-    assert usecase.ConsolidateCatalogUseCase(**_config(output)).execute() == 1
+    assert _run(output) == 1
     assert output.read_bytes() == b"SQLite format 3\x00previous"
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -434,5 +452,55 @@ def test_pipeline_aborts_on_unrecognized_schema(
 
     monkeypatch.setattr(usecase, "download_to", fake_download_to)
     output = tmp_path / "out.db"
-    assert usecase.ConsolidateCatalogUseCase(**_config(output)).execute() == 1
+    assert _run(output) == 1
     assert not output.exists()
+
+
+# --------------------------------------------------------------------------- #
+# The two big use cases, exercised on their own.
+# --------------------------------------------------------------------------- #
+def test_prepare_catalog_database_use_case(_stub_download: Path, tmp_path: Path) -> None:
+    repository = SqliteCatalogRepository()
+    prepared = PrepareCatalogDatabaseUseCase(repository).execute(
+        "https://example.com/catalog.db", tmp_path
+    )
+    try:
+        assert prepared.exists()
+        # left connected with foreign keys enabled, ready to consolidate
+        conn = repository.connection()
+        assert conn.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+        assert _count(prepared, "Product") == PRODUCT_ROWS
+        assert _rows(prepared, "SELECT version_num FROM alembic_version") == [("0001",)]
+        assert _rows(prepared, "PRAGMA foreign_key_check") == []
+    finally:
+        repository.close()
+        prepared.unlink(missing_ok=True)
+
+
+def test_consolidate_feed_use_case_links_into_prepared_db(migrated_db: Path) -> None:
+    entries = [
+        ProductEntry.model_validate(
+            {
+                "Id": "sku-1",
+                "SellerName": "GardenStore",
+                "Name": "Camera Canon EOS R6",
+                "Brand": "Canon",
+                "Category": "Photography",
+            }
+        )
+    ]
+    engine = create_engine(f"sqlite:///{migrated_db}")
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            report = ConsolidateFeedUseCase(
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+            ).execute(iter(entries))
+    finally:
+        engine.dispose()
+
+    assert report.processed == 1
+    assert report.new == 0
+    assert report.linked == 1
+    assert _count(migrated_db, "SellerProduct") == 1
+    assert _count(migrated_db, "Seller") == 1

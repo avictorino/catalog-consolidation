@@ -9,8 +9,8 @@ from consolidation import schema
 from consolidation.domain import Catalog, Product
 from consolidation.infrastructure import DifflibSimilarity, ProductEntry, RapidFuzzSimilarity
 from consolidation.repository import CatalogRepositories
-from consolidation.services import Similarity, resolve_product
-from consolidation.usecase import ConsolidateEntryUseCase, Report
+from consolidation.services import ProductIdentityResolver, Similarity, resolve_product
+from consolidation.usecase import ConsolidateFeedUseCase
 
 from .conftest import PRODUCT_ROWS
 
@@ -135,15 +135,11 @@ def test_new_product_is_reused_for_reordered_listing(
     engine = create_engine(f"sqlite:///{migrated_db}")
     try:
         with engine.connect() as conn:
-            repos = CatalogRepositories(conn)
-            importer = ConsolidateEntryUseCase(repos.load_catalog(), repos, similarity, 1.0)
-            conn.commit()
-            report = Report()
-            for index, entry in enumerate(entries):
-                with conn.begin():
-                    importer.process(entry, index, report)
-            with conn.begin():
-                importer.process(entries[1], 2, report)
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            # third entry re-processes the reordered listing to prove idempotency
+            report = ConsolidateFeedUseCase(
+                CatalogRepositories(conn), ProductIdentityResolver(similarity, 1.0)
+            ).execute(iter([*entries, entries[1]]))
 
             assert report.new == 1
             assert report.linked == 2
@@ -210,15 +206,10 @@ def test_importer_persists_links_idempotently(migrated_db: Path, caplog) -> None
     )
     try:
         with engine.connect() as conn:
-            trans = conn.begin()
-            repos = CatalogRepositories(conn)
-            importer = ConsolidateEntryUseCase(
-                repos.load_catalog(), repos, DifflibSimilarity(), 0.90
-            )
-            report = Report()
-            importer.process(entry, 0, report)
-            importer.process(entry.model_copy(update={"Id": "sku-2"}), 1, report)
-            trans.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            report = ConsolidateFeedUseCase(
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+            ).execute(iter([entry, entry.model_copy(update={"Id": "sku-2"})]))
 
             assert report.new == 0
             assert report.linked == 1
@@ -251,39 +242,33 @@ def test_same_sku_cannot_be_reassociated(migrated_db: Path) -> None:
     engine = create_engine(f"sqlite:///{migrated_db}")
     try:
         with engine.connect() as conn:
-            trans = conn.begin()
-            repos = CatalogRepositories(conn)
-            importer = ConsolidateEntryUseCase(
-                repos.load_catalog(), repos, DifflibSimilarity(), 0.90
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            report = ConsolidateFeedUseCase(
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+            ).execute(
+                iter(
+                    [
+                        ProductEntry.model_validate(
+                            {
+                                "Id": "same-sku",
+                                "SellerName": "seller",
+                                "Name": "Camera Canon EOS R6",
+                                "Brand": "Canon",
+                                "Category": "Photography",
+                            }
+                        ),
+                        ProductEntry.model_validate(
+                            {
+                                "Id": "same-sku",
+                                "SellerName": "seller",
+                                "Name": "Cordless Drill",
+                                "Brand": "BLACK+DECKER",
+                                "Category": "Tools",
+                            }
+                        ),
+                    ]
+                )
             )
-            report = Report()
-            importer.process(
-                ProductEntry.model_validate(
-                    {
-                        "Id": "same-sku",
-                        "SellerName": "seller",
-                        "Name": "Camera Canon EOS R6",
-                        "Brand": "Canon",
-                        "Category": "Photography",
-                    }
-                ),
-                0,
-                report,
-            )
-            importer.process(
-                ProductEntry.model_validate(
-                    {
-                        "Id": "same-sku",
-                        "SellerName": "seller",
-                        "Name": "Cordless Drill",
-                        "Brand": "BLACK+DECKER",
-                        "Category": "Tools",
-                    }
-                ),
-                1,
-                report,
-            )
-            trans.commit()
             assert report.linked == 1
             assert report.skipped == 1
             assert report.skipped_entries == [

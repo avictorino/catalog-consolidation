@@ -1,16 +1,23 @@
 """Application layer — use cases that orchestrate the domain and the repositories.
 
-Two use cases:
+Three use cases, smallest to largest:
 
 * :class:`ConsolidateEntryUseCase` — apply one validated seller submission
-  (screen, resolve identity, create-or-link, record the outcome). Pure policy; all
-  persistence goes through the injected repository bundle.
-* :class:`ConsolidateCatalogUseCase` — the end-to-end run: download, migrate,
-  stream the feed, drive the per-entry use case inside one transaction each,
-  publish atomically.
+  (screen, resolve identity, create-or-link, record the outcome). Pure policy;
+  all persistence goes through the injected repository bundle.
+* :class:`PrepareCatalogDatabaseUseCase` — download ``catalog.db``, classify it,
+  run the schema migration; hand back a database file *ready to be consolidated*.
+* :class:`ConsolidateFeedUseCase` — given a ``CatalogRepositories`` bundle (which
+  carries the live connection to a prepared database) and the seller feed, resolve
+  every listing (exact / word-order / fuzzy) and persist the links, creating
+  products only when genuinely new. Returns a Report.
 
-Both collaborators the run needs — the ``Similarity`` backend and the
-``CatalogRepositories`` factory — are injected, so the use cases never build them.
+:class:`ConsolidateCatalogUseCase` ties the feed consumption to atomic publishing;
+the composition root (:mod:`consolidation.cli`) runs
+:class:`PrepareCatalogDatabaseUseCase` first and passes it the prepared file.
+
+Injected collaborators (a ready ``ProductIdentityResolver``, the
+``CatalogRepository`` port) are passed in, never built by the use cases.
 
 Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
 :mod:`consolidation.repository`, :mod:`consolidation.infrastructure`.
@@ -19,30 +26,62 @@ Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
-from alembic import command
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Connection
-
-from consolidation.domain import Catalog, Product, Submission, new_uuid, normalize
+from consolidation.domain import Product, Submission, new_uuid, normalize
 from consolidation.infrastructure import (
     FeedValidationError,
-    alembic_config,
-    classify_source,
     download_to,
     iter_feed,
     screen_entry,
-    verify_sqlite_header,
 )
 from consolidation.repository import CatalogRepositories
-from consolidation.services import ProductIdentityResolver, Similarity
+from consolidation.services import ProductIdentityResolver
 
 logger = logging.getLogger("consolidation")
 
-RepositoriesFactory = Callable[[Connection], CatalogRepositories]
+
+class CatalogRepository(Protocol):
+    """Port: the one repository a run needs — prepare the catalog database, then
+    hand out per-aggregate access to it.
+
+    Implemented per database engine in :mod:`consolidation.infrastructure`
+    (``SqliteCatalogRepository``). The use cases depend only on this contract —
+    they never import SQLAlchemy or Alembic and do not know the file is SQLite.
+    """
+
+    # -- preparation (migration) --------------------------------------- #
+    def verify_database(self, path: Path) -> None:
+        """Raise if the file at ``path`` is not a valid database of this kind."""
+
+    def connect(self, path: Path) -> None:
+        """Open a connection to the database at ``path``."""
+
+    def classify_source(self) -> str:
+        """``'legacy'`` | ``'migrated'`` | ``'unrecognized'``."""
+
+    def begin(self) -> None:
+        """Start the migration transaction."""
+
+    def upgrade(self) -> None:
+        """Run the schema migration to head."""
+
+    def commit(self) -> None: ...
+
+    def rollback(self) -> None: ...
+
+    def enable_foreign_keys(self) -> None:
+        """Turn on and verify referential-integrity enforcement for the run."""
+
+    # -- consumption --------------------------------------------------- #
+    def catalog_repositories(self) -> CatalogRepositories:
+        """A ``CatalogRepositories`` bundle bound to the live connection."""
+
+    def close(self) -> None:
+        """Release the connection and any engine-level resources."""
 
 
 @dataclass
@@ -61,26 +100,24 @@ class Report:
 
 
 # --------------------------------------------------------------------------- #
-# Use case 1: consolidate one seller submission.
+# Use case: consolidate one seller submission.
 # --------------------------------------------------------------------------- #
 class ConsolidateEntryUseCase:
     """Apply one validated feed entry inside the caller's transaction.
 
-    Receives the working :class:`~consolidation.domain.Catalog` and a
-    :class:`~consolidation.repository.CatalogRepositories` bundle — every database
-    access already instantiated against the run's connection.
+    Receives the :class:`~consolidation.repository.CatalogRepositories` bundle
+    (which reads the working :class:`~consolidation.domain.Catalog` for us) and a
+    ready :class:`~consolidation.services.ProductIdentityResolver`.
     """
 
     def __init__(
         self,
-        catalog: Catalog,
         repositories: CatalogRepositories,
-        similarity: Similarity,
-        threshold: float,
+        resolver: ProductIdentityResolver,
     ) -> None:
-        self.catalog = catalog
         self.repositories = repositories
-        self.resolver = ProductIdentityResolver(similarity, threshold)
+        self.catalog = repositories.load_catalog()
+        self.resolver = resolver
 
     # -- steps ------------------------------------------------------------- #
     def _create_product(self, submission: Submission) -> Product:
@@ -207,137 +244,87 @@ class ConsolidateEntryUseCase:
 
 
 # --------------------------------------------------------------------------- #
-# Use case 2: the full consolidation run.
+# Use case 1: prepare the database.
 # --------------------------------------------------------------------------- #
-class ConsolidateCatalogUseCase:
-    """End-to-end run: download the catalog, refactor its schema, stream the seller
-    feed through :class:`ConsolidateEntryUseCase` (one transaction per entry), and
-    publish the output atomically only on success.
+class PrepareCatalogDatabaseUseCase:
+    """Download ``catalog.db``, classify the source, run the one-way schema
+    migration, and turn on integrity enforcement. Returns the path to a database
+    file ready to be consolidated.
 
-    Injected collaborators:
+    Every database-specific step goes through the injected
+    :class:`CatalogRepository`; this use case does not know it is SQLite. On
+    success the repository is left **connected** (with foreign keys enabled) so
+    the next use case consumes on the same connection — the caller owns closing
+    it. On any failure the repository is closed and the partial file deleted.
+    """
 
-    * ``similarity`` — an already-constructed ``Similarity`` backend (the
-      composition root picks it via ``infrastructure.build_similarity``);
-    * ``repositories`` — a factory ``(Connection) -> CatalogRepositories`` that
-      builds the whole database-access bundle for the run's connection. A test
-      can pass a fake here; the default is the real bundle.
+    def __init__(self, repository: CatalogRepository) -> None:
+        self.repository = repository
 
-    Construct with the resolved configuration and call :meth:`execute`, which
-    returns a process exit code (``0`` ok, ``1`` on any failure or item failure).
+    def execute(self, catalog_url: str, dest_dir: str | Path) -> Path:
+        tmp = download_to(catalog_url, dest_dir)
+        try:
+            self.repository.verify_database(tmp)
+            self.repository.connect(tmp)
+            self._migrate()
+            self.repository.enable_foreign_keys()
+        except Exception:
+            self.repository.close()
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        logger.info("catalog database prepared path=%s", tmp)
+        return tmp
+
+    def _migrate(self) -> None:
+        self.repository.begin()
+        try:
+            source = self.repository.classify_source()
+            logger.info("source classified as=%s", source)
+            if source == "unrecognized":
+                raise RuntimeError("unrecognized catalog schema; aborting before any write")
+            self.repository.upgrade()
+            self.repository.commit()
+            logger.info("schema refactor committed")
+        except Exception:
+            self.repository.rollback()
+            raise
+
+
+# --------------------------------------------------------------------------- #
+# Use case 2: consolidate the seller feed into a prepared database.
+# --------------------------------------------------------------------------- #
+class ConsolidateFeedUseCase:
+    """Given a :class:`~consolidation.repository.CatalogRepositories` bundle and the
+    seller feed, resolve each listing and persist links (one transaction per
+    entry via ``repositories.entry_transaction()``), creating products only when
+    genuinely new. A failed entry rolls back in isolation and is reported; the
+    in-memory view is then rebuilt (``repositories.reload()``) and later entries
+    continue. Returns the :class:`Report`.
     """
 
     def __init__(
         self,
-        *,
-        catalog_url: str,
-        products_url: str,
-        output: str | Path,
-        similarity: Similarity,
-        threshold: float,
-        repositories: RepositoriesFactory = CatalogRepositories,
+        repositories: CatalogRepositories,
+        resolver: ProductIdentityResolver,
     ) -> None:
-        self.catalog_url = catalog_url
-        self.products_url = products_url
-        self.output = Path(output).resolve()
-        self.similarity = similarity
-        self.threshold = threshold
         self.repositories = repositories
+        self.resolver = resolver
 
-    # -- public entry point --------------------------------------------- #
-    def execute(self) -> int:
-        logger.info(
-            "run config products_url=%s matcher=%s threshold=%s",
-            self.products_url,
-            self.similarity.name,
-            self.threshold,
-        )
-        tmp: Path | None = None
-        report: Report | None = None
-        try:
-            tmp = download_to(self.catalog_url, self.output.parent)
-            verify_sqlite_header(tmp)
+    def execute(self, feed: Iterable[Submission]) -> Report:
+        repositories = self.repositories
+        entry_use_case = ConsolidateEntryUseCase(repositories, self.resolver)
 
-            engine = create_engine(f"sqlite:///{tmp}")
-            try:
-                with engine.connect() as conn:
-                    report = self._process_connection(conn)
-            finally:
-                engine.dispose()
-
-            self._publish(tmp)
-            tmp = None
-            return 1 if report and report.failed else 0
-        except FeedValidationError as exc:
-            logger.error("feed validation failed record=%d fields=%s", exc.record_index, exc.fields)
-            logger.exception("run failed")
-            return 1
-        except Exception:
-            logger.exception("run failed")
-            return 1
-        finally:
-            if tmp is not None:
-                Path(tmp).unlink(missing_ok=True)
-
-    # -- steps --------------------------------------------------------- #
-    def _process_connection(self, conn: Connection) -> Report:
-        trans = conn.begin()
-        try:
-            self._refactor_schema(conn, trans)
-            self._enable_foreign_keys(conn)
-
-            report = self._consume_feed(conn)
-            logger.info("feed processing complete")
-            return report
-        except Exception:
-            if trans.is_active:
-                trans.rollback()
-            logger.error("setup or feed stream failed; previous output preserved")
-            raise
-
-    @staticmethod
-    def _refactor_schema(conn: Connection, trans) -> None:
-        source = classify_source(conn)
-        logger.info("source classified as=%s", source)
-        if source == "unrecognized":
-            raise RuntimeError("unrecognized catalog schema; aborting before any write")
-        command.upgrade(alembic_config(conn), "head")
-        trans.commit()
-        logger.info("schema refactor committed")
-
-    @staticmethod
-    def _enable_foreign_keys(conn: Connection) -> None:
-        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
-        if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
-            raise RuntimeError("foreign key enforcement could not be enabled")
-        conn.commit()
-        logger.info("foreign key enforcement enabled")
-
-    def _new_entry_use_case(self, conn: Connection) -> ConsolidateEntryUseCase:
-        """Build the per-entry use case, priming its in-memory indexes from the DB.
-        Also used to rebuild them after an item transaction is rolled back."""
-        repositories = self.repositories(conn)
-        use_case = ConsolidateEntryUseCase(
-            repositories.load_catalog(), repositories, self.similarity, self.threshold
-        )
-        conn.commit()
-        return use_case
-
-    def _consume_feed(self, conn: Connection) -> Report:
-        use_case = self._new_entry_use_case(conn)
         report = Report()
-        for record_index, entry in enumerate(iter_feed(self.products_url)):
+        for record_index, entry in enumerate(feed):
             report.processed += 1
             if record_index == 0:
                 logger.info("first feed record received")
 
             item_report = Report()
-            item_trans = conn.begin()
             try:
-                use_case.process(entry, record_index, item_report)
-                item_trans.commit()
+                with repositories.entry_transaction():
+                    entry_use_case.process(entry, record_index, item_report)
             except Exception as exc:
-                if item_trans.is_active:
-                    item_trans.rollback()
                 report.failed += 1
                 detail = str(exc).splitlines()[0][:200] or type(exc).__name__
                 report.failures.append(
@@ -346,7 +333,8 @@ class ConsolidateCatalogUseCase:
                         "error": f"{type(exc).__name__}: {detail}",
                     }
                 )
-                use_case = self._new_entry_use_case(conn)
+                repositories.reload()
+                entry_use_case = ConsolidateEntryUseCase(repositories, self.resolver)
                 continue
 
             self._merge_item_report(report, item_report)
@@ -356,15 +344,6 @@ class ConsolidateCatalogUseCase:
         self._log_feed_summary(report)
         return report
 
-    def _publish(self, tmp: Path) -> None:
-        """Atomically replace the output with ``tmp`` (only after a successful run)."""
-        self.output.parent.mkdir(parents=True, exist_ok=True)
-        if self.output.exists():
-            logger.warning("replacing existing output path=%s", self.output)
-        tmp.replace(self.output)
-        logger.info("published output path=%s", self.output)
-
-    # -- report helpers ---------------------------------------------- #
     @staticmethod
     def _merge_item_report(report: Report, item_report: Report) -> None:
         report.new += item_report.new
@@ -395,3 +374,76 @@ class ConsolidateCatalogUseCase:
                     failure["record_index"],
                     failure["error"],
                 )
+
+
+# --------------------------------------------------------------------------- #
+# Coordinator: run the two use cases and publish.
+# --------------------------------------------------------------------------- #
+class ConsolidateCatalogUseCase:
+    """Consume the seller feed into an **already prepared** database and publish the
+    output atomically only on a fully successful run. Returns a process exit code
+    (``0`` ok, ``1`` on any failure or item failure).
+
+    Preparing the database (``PrepareCatalogDatabaseUseCase``) is the caller's job
+    — the composition root (:mod:`consolidation.cli`) runs it, then hands this use
+    case the **same** ``repository`` (still connected, foreign keys on) plus the
+    prepared file path.
+
+    Injected collaborators: ``repository`` (the ``CatalogRepository`` — source of
+    both the live connection and the per-aggregate bundle) and ``resolver`` (a
+    ready ``ProductIdentityResolver``, already carrying the similarity backend and
+    the threshold).
+    """
+
+    def __init__(self, repository: CatalogRepository, resolver: ProductIdentityResolver) -> None:
+        self.repository = repository
+        self.resolver = resolver
+
+    def execute(
+        self,
+        prepared_database: str | Path,
+        products_url: str,
+        output: str | Path,
+    ) -> int:
+        prepared_database = Path(prepared_database)
+        output = Path(output).resolve()
+        logger.info(
+            "run config products_url=%s matcher=%s threshold=%s",
+            products_url,
+            self.resolver.similarity.name,
+            self.resolver.threshold,
+        )
+        published = False
+        try:
+            report = self._consume_feed(products_url)
+            self.repository.close()  # release the file before moving it
+            self._publish(prepared_database, output)
+            published = True
+            return 1 if report.failed else 0
+        except FeedValidationError as exc:
+            logger.error("feed validation failed record=%d fields=%s", exc.record_index, exc.fields)
+            logger.exception("run failed")
+            return 1
+        except Exception:
+            logger.exception("run failed")
+            return 1
+        finally:
+            self.repository.close()
+            if not published:
+                prepared_database.unlink(missing_ok=True)
+
+    def _consume_feed(self, products_url: str) -> Report:
+        repositories = self.repository.catalog_repositories()
+        feed = iter_feed(products_url)
+        report = ConsolidateFeedUseCase(repositories, self.resolver).execute(feed)
+        logger.info("feed processing complete")
+        return report
+
+    @staticmethod
+    def _publish(tmp: Path, output: Path) -> None:
+        """Atomically replace ``output`` with ``tmp`` (only after a successful run)."""
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if output.exists():
+            logger.warning("replacing existing output path=%s", output)
+        tmp.replace(output)
+        logger.info("published output path=%s", output)

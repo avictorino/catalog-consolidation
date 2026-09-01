@@ -120,14 +120,18 @@ this point.
 
 ## 4. Persistence
 
-- Database access is through **SQLAlchemy Core** (declarative `Table` metadata,
-  `insert()` / `select()` / `insert().from_select()`). No ORM. The schema refactor is a
-  single Alembic revision (`0001`); no revision chain, no autogenerate, no offline mode.
-- The schema refactor runs in its setup transaction. Feed processing then uses one
-  transaction per entry: a successful entry is committed immediately, while an entry
-  failure is rolled back in isolation and recorded before the next entry is attempted.
-  Alembic still runs with the import connection injected
-  (`config.attributes["connection"]`).
+- Database access is through **SQLAlchemy Core** — declarative `Table` metadata
+  (`consolidation.schema`), `insert()` / `select()` in the repositories
+  (`consolidation.repository`), and parameterized `text()` statements for the
+  migration steps (`consolidation.infrastructure`). No ORM. The refactor is a single
+  Alembic revision (`0001`); no revision chain, no autogenerate, no offline mode.
+- The whole run uses **one connection**, opened by `PrepareCatalogDatabaseUseCase`
+  and handed to the consumption use case still open. The schema refactor runs in its
+  setup transaction (Alembic invoked with that connection injected,
+  `config.attributes["connection"]`). Feed processing then uses one transaction per
+  entry (`CatalogRepositories.entry_transaction()`): a successful entry is committed
+  immediately, an entry failure is rolled back in isolation, recorded, and the
+  in-memory caches are reloaded before the next entry is attempted.
 - All statements that carry external data are parameterized (Core does this by construction).
 - `SellerProduct` identity is `(SellerId, ProductId)`; `UNIQUE (SellerId, ExternalSku)`
   is also enforced. Re-inserting the same pair is a no-op (`INSERT OR IGNORE`).
@@ -170,26 +174,30 @@ requirements on top of that:
 
 ## 6. Matcher interface
 
-The `Similarity` protocol and its two implementations are defined in
-[`prd.md#matcher-layer-parameter-injection`](../prd.md#matcher-layer-parameter-injection).
+The `Similarity` protocol (in `consolidation.services`) and its two implementations
+(in `consolidation.infrastructure`) are described in
+[`prd.md#matcher-layer-dependency-injection`](../prd.md#matcher-layer-dependency-injection).
 Normative requirements:
 
 - Both implementations satisfy the identical `score(a, b) -> float` (`[0, 1]`) contract
   and pass the same test suite.
-- The backend is chosen in the CLI and injected into `consolidate(...)` as a keyword
-  argument. `rapidfuzz` is imported lazily — `--matcher difflib` must not require it.
+- The backend is chosen in the CLI, wrapped together with the threshold in a
+  `ProductIdentityResolver`, and that single resolver is injected into the use cases.
+  `rapidfuzz` is imported lazily — `--matcher difflib` must not require it.
 - `fuzz.WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
 - Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan.
 
 ## 7. Report and exit codes
 
-The final summary reports: `processed`, `new`, `linked`, `skipped`, `threat`.
+The final summary reports: `processed`, `new`, `linked`, `skipped`, `threat`, `failed`.
 
 - `processed` — entries read from the feed.
 - `new` — products inserted.
 - `linked` — `(SellerId, ProductId)` links inserted.
 - `skipped` — entries dropped for ambiguity or a brand conflict (§3).
 - `threat` — entries rejected by the SQL injection screen (§2).
+- `failed` — entries whose transaction rolled back on a persistence error; each is
+  listed afterwards with its record index and captured reason.
 
 Exit codes:
 

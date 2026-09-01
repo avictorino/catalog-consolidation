@@ -4,14 +4,17 @@ outside the repositories.
 Everything that talks to something external or runs SQL against the connection:
 the HTTP catalog download, the streamed seller feed and its anti-corruption layer
 (``ProductEntry``), the SQL-injection screen, the concrete similarity backends,
-the Alembic wiring, and the schema-refactor steps the Alembic revision executes
-(source classification + the staged rebuild). Nothing here holds business rules.
+the Alembic wiring, the schema-refactor steps the Alembic revision executes
+(source classification + the staged rebuild), and ``SqliteCatalogRepository`` —
+the SQLite adapter for the ``CatalogRepository`` port the use cases depend on.
+Nothing here holds business rules.
 
 The declarative table metadata itself stays in :mod:`consolidation.schema`;
 this module only *executes* against a database.
 
-Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`; plus
-requests / ijson / pydantic / libinjection / rapidfuzz / alembic / SQLAlchemy.
+Depends on: :mod:`consolidation.domain`, :mod:`consolidation.services`,
+:mod:`consolidation.repository`; plus requests / ijson / pydantic / libinjection /
+rapidfuzz / alembic / SQLAlchemy.
 """
 
 from __future__ import annotations
@@ -26,12 +29,14 @@ from typing import BinaryIO, Literal
 import ijson
 import libinjection
 import requests
+from alembic import command
 from alembic.config import Config as AlembicConfig
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
-from sqlalchemy import inspect, text
-from sqlalchemy.engine import Connection
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Connection, Engine, Transaction
 
 from consolidation.domain import ThreatFinding, new_uuid, normalize
+from consolidation.repository import CatalogRepositories
 from consolidation.services import Similarity
 
 logger = logging.getLogger("consolidation")
@@ -530,3 +535,78 @@ def foreign_key_check(conn: Connection) -> None:
     violations = conn.execute(text("PRAGMA foreign_key_check")).all()
     if violations:
         raise RuntimeError(f"foreign_key_check failed: {violations!r}")
+
+
+# --------------------------------------------------------------------------- #
+# Catalog repository — the SQLite adapter for the ``CatalogRepository`` port the
+# use cases depend on. Everything engine-, driver- and Alembic-specific about
+# "get a downloaded file ready to consolidate, then serve it" lives here.
+# --------------------------------------------------------------------------- #
+class SqliteCatalogRepository:
+    """Wrap SQLAlchemy engine/connection creation, the SQLite header check, the
+    Alembic upgrade and the ``CatalogRepositories`` bundle behind the port.
+
+    ``url_template`` is the only knob: swap it (or write another adapter) to target
+    a different database — the use cases never see ``sqlite:///``.
+    """
+
+    def __init__(self, *, url_template: str = "sqlite:///{path}") -> None:
+        self._url_template = url_template
+        self._engine: Engine | None = None
+        self._conn: Connection | None = None
+        self._trans: Transaction | None = None
+
+    def verify_database(self, path: Path) -> None:
+        verify_sqlite_header(path)
+
+    def connect(self, path: Path) -> None:
+        self._engine = create_engine(self._url_template.format(path=path))
+        self._conn = self._engine.connect()
+
+    def classify_source(self) -> str:
+        return classify_source(self._require_conn())
+
+    def begin(self) -> None:
+        self._trans = self._require_conn().begin()
+
+    def upgrade(self) -> None:
+        command.upgrade(alembic_config(self._require_conn()), "head")
+
+    def commit(self) -> None:
+        if self._trans is not None:
+            self._trans.commit()
+            self._trans = None
+
+    def rollback(self) -> None:
+        if self._trans is not None and self._trans.is_active:
+            self._trans.rollback()
+        self._trans = None
+
+    def enable_foreign_keys(self) -> None:
+        # SQLite: ``PRAGMA foreign_keys`` is a no-op inside a transaction, so this
+        # runs after the migration has committed and before any feed work begins.
+        conn = self._require_conn()
+        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+        if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+            raise RuntimeError("foreign key enforcement could not be enabled")
+        conn.commit()
+        logger.info("foreign key enforcement enabled")
+
+    def connection(self) -> Connection:
+        return self._require_conn()
+
+    def catalog_repositories(self) -> CatalogRepositories:
+        return CatalogRepositories(self._require_conn())
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+        if self._engine is not None:
+            self._engine.dispose()
+            self._engine = None
+
+    def _require_conn(self) -> Connection:
+        if self._conn is None:
+            raise RuntimeError("migration repository is not connected; call connect() first")
+        return self._conn

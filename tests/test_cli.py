@@ -50,7 +50,7 @@ def test_resolves_from_env_file(env_file: Path) -> None:
     assert config == {
         "catalog_url": "https://example.com/catalog.db",
         "products_url": "https://example.com/ProductEntry.json",
-        "output": "catalog_output.db",
+        "output": Path("catalog_output.db").resolve(),
         "matcher": "rapidfuzz",
         "threshold": pytest.approx(0.90),
     }
