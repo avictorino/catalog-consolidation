@@ -15,7 +15,7 @@ Working rules for AI assistance on this repository.
 - Keep the surface small: seven layer modules, small functions, explicit constructor
   injection at the composition root. No DI container or framework, no deep class
   hierarchies, no ORM. Two injected seams, same shape: the `Similarity` backend and
-  the `ByteSource` transport.
+  the seller-feed `ByteSource` transport (the catalog download stays on `requests`).
 
 ## Architecture (DDD, simplified)
 
@@ -27,7 +27,7 @@ One module per layer — walkthrough in [`docs/arquitetura.md`](docs/arquitetura
 | `services.py` | domain services / ports | `resolve_product` / `ProductIdentityResolver` (identity rules) + `Similarity` port + `ByteSource` port |
 | `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories`; the **only** code that touches the connection (`load_catalog`, `entry_transaction()`, `reload()`); the connection is private (`_conn`) |
 | `schema.py` | persistence schema | SQLAlchemy `Table` metadata only; no `Connection` |
-| `infrastructure.py` | infrastructure | `HttpByteSource`/`S3ByteSource` transports + `build_source`, download, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, `SqliteCatalogRepository` |
+| `infrastructure.py` | infrastructure | catalog download (`requests`), feed `HttpByteSource`/`S3ByteSource` transports + `build_source`, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, `SqliteCatalogRepository` |
 | `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, `ConsolidateCatalogUseCase` coordinator, `CatalogRepository` port |
 | `cli.py` | interface / composition root | resolve config, build the resolver + byte source + repository, run the two use cases in order |
 
@@ -40,7 +40,8 @@ Rules that follow from the layering:
 - The use cases receive collaborators built by `cli.py`: one `CatalogRepository`
   (prepares the DB and hands out the `CatalogRepositories` bundle), one
   `ProductIdentityResolver` (wraps the `Similarity` backend and the threshold), and
-  one `ByteSource` (`http`/`s3`, used for both the download and the feed). Nothing
+  one `ByteSource` (`http`/`s3`) — the **seller-feed** transport, passed only to
+  `ConsolidateCatalogUseCase`. The catalog download is plain `requests`. Nothing
   threads `similarity`, `threshold`, `requests` or `boto3` layer by layer.
 - The migration revision (`0001`) delegates to helpers in `consolidation.infrastructure`.
 
@@ -63,8 +64,9 @@ Rules that follow from the layering:
   reference table connected through the `ProductCategory` junction.
   `ExternalSku` = the feed entry `Id`, stored opaque; first writer wins.
 - Stream the feed: no `response.json()`, `response.content`, `list(iterator)`, or a
-  local copy of the JSON. Both the download and the feed go through the injected
-  `ByteSource`; `iter_feed` / `download_to` never import `requests` or `boto3`.
+  local copy of the JSON. The feed goes through the injected `ByteSource`;
+  `iter_feed` never imports `requests` or `boto3`. `download_to` (catalog only)
+  stays on plain `requests`.
 - Validate feed objects one at a time with Pydantic v2, then screen every string field
   with `libinjection`; a hit rejects the entry and increments `threat`.
 - All SQL carrying external data is parameterized (SQLAlchemy Core does this).
@@ -72,9 +74,10 @@ Rules that follow from the layering:
 - The two `Similarity` backends implement the same `score(a, b) -> float` contract and
   pass the same tests. `rapidfuzz` is imported lazily.
   `WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
-- The two `ByteSource` transports implement the same `open(ref)` contract and pass
-  the same tests. `boto3` is imported lazily (inside `S3ByteSource.open`);
-  `--source s3` is unsigned and assumes public objects.
+- The two `ByteSource` transports (seller feed only) implement the same `open(ref)`
+  contract and pass the same tests. `boto3` is imported lazily (inside
+  `S3ByteSource.open`); `--source s3` is unsigned and assumes public objects, and
+  the CLI rewrites an `…amazonaws.com` `--products-url` to `s3://bucket/key`.
 
 ## Verification commands
 
@@ -86,7 +89,6 @@ pip-audit -r requirements.txt -r requirements-dev.txt
 python -m consolidation.cli --matcher difflib
 python -m consolidation.cli --matcher rapidfuzz
 python -m consolidation.cli --source s3 \
-  --catalog-url s3://engineering-hiring-process/catalog.db \
   --products-url s3://engineering-hiring-process/ProductEntry.json
 ```
 

@@ -158,7 +158,7 @@ def test_product_seller_values_are_copied_to_seller(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def _stub_download(monkeypatch: pytest.MonkeyPatch, legacy_db: Path):
-    def fake_download_to(url: str, dest_dir: Path, source: object) -> Path:
+    def fake_download_to(url: str, dest_dir: Path) -> Path:
         dest_dir.mkdir(parents=True, exist_ok=True)
         tmp = dest_dir / ".catalog-stub.db.tmp"
         shutil.copy(legacy_db, tmp)
@@ -178,15 +178,12 @@ def _run(output: Path, *, threshold: float = 0.90) -> int:
     output = Path(output)
     repository = SqliteCatalogRepository()
     resolver = ProductIdentityResolver(DifflibSimilarity(), threshold)
-    source = HttpByteSource()
     try:
-        prepared = PrepareCatalogDatabaseUseCase(repository, source).execute(
-            _CATALOG_URL, output.parent
-        )
+        prepared = PrepareCatalogDatabaseUseCase(repository).execute(_CATALOG_URL, output.parent)
     except Exception:
         logging.getLogger("consolidation").exception("run failed")
         return 1
-    return ConsolidateCatalogUseCase(repository, resolver, source).execute(
+    return ConsolidateCatalogUseCase(repository, resolver, HttpByteSource()).execute(
         prepared, _PRODUCTS_URL, output
     )
 
@@ -451,7 +448,7 @@ def test_pipeline_aborts_on_unrecognized_schema(
     empty = tmp_path / "empty.db"
     sqlite3.connect(empty).close()
 
-    def fake_download_to(url: str, dest_dir: Path, source: object) -> Path:
+    def fake_download_to(url: str, dest_dir: Path) -> Path:
         tmp = dest_dir / ".catalog-stub.db.tmp"
         shutil.copy(empty, tmp)
         return tmp
@@ -467,7 +464,7 @@ def test_pipeline_aborts_on_unrecognized_schema(
 # --------------------------------------------------------------------------- #
 def test_prepare_catalog_database_use_case(_stub_download: Path, tmp_path: Path) -> None:
     repository = SqliteCatalogRepository()
-    prepared = PrepareCatalogDatabaseUseCase(repository, HttpByteSource()).execute(
+    prepared = PrepareCatalogDatabaseUseCase(repository).execute(
         "https://example.com/catalog.db", tmp_path
     )
     try:

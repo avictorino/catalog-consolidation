@@ -19,7 +19,8 @@ the database.
 
 | Concern | Choice | Notes |
 | --- | --- | --- |
-| Byte transport | `requests` (streaming) / `boto3` (`get_object`) | interchangeable `ByteSource` backends behind `--source http\|s3`; both feed the same chunked download and streamed feed. `boto3` imported lazily |
+| HTTP (catalog) | `requests` (streaming) | chunked download of the DB to a temp file — always, not swappable |
+| Feed transport | `requests` / `boto3` (`get_object`) | interchangeable `ByteSource` backends behind `--source http\|s3`, for the **seller feed only**; `boto3` imported lazily |
 | JSON | `ijson` | incremental array parsing; no full document in memory |
 | Feed validation | `pydantic` v2 | one object at a time (`model_validate`) |
 | Similarity | `difflib` (stdlib) / `rapidfuzz` | interchangeable `score()` backends |
@@ -55,11 +56,12 @@ Seven modules, one per layer — full walkthrough in
 | `schema.py` | persistence schema | SQLAlchemy `Table` metadata only; no function takes a `Connection` |
 | `infrastructure.py` | infrastructure | `HttpByteSource`/`S3ByteSource` + `build_source`, `download_to` / `verify_sqlite_header`, streamed feed (`iter_feed`) + ACL (`ProductEntry`), `screen_entry`, `Difflib`/`RapidFuzz` backends + `build_similarity`, Alembic wiring, the migration steps (`classify_source`, `rebuild_*`, …), and `SqliteCatalogRepository` (the `CatalogRepository` adapter) |
 | `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, the `ConsolidateCatalogUseCase` coordinator, the `Report` read model, and the `CatalogRepository` port definition |
-| `cli.py` | interface / composition root | resolves config, builds the `ProductIdentityResolver` and `SqliteCatalogRepository`, runs the two use cases in order |
+| `cli.py` | interface / composition root | resolves config, builds the `ProductIdentityResolver`, the feed `ByteSource` and `SqliteCatalogRepository`, runs the two use cases in order |
 
 Injected, never built by the use cases: **one** `CatalogRepository` (prepares the DB
-*and* hands out the `CatalogRepositories` bundle) and **one** `ProductIdentityResolver`
-(already carrying the similarity backend and the threshold).
+*and* hands out the `CatalogRepositories` bundle), **one** `ProductIdentityResolver`
+(already carrying the similarity backend and the threshold), and **one** `ByteSource`
+(the seller-feed transport — the catalog download stays on plain `requests`).
 
 ## Data
 
@@ -198,17 +200,19 @@ picks one by name:
 
 - **`Similarity`** — the fuzzy-scoring backend (`difflib` / `rapidfuzz`), wrapped
   with the threshold in a `ProductIdentityResolver`.
-- **`ByteSource`** — the byte-stream transport (`http` via `requests` /
-  `s3` via `boto3`), used for **both** the catalog download and the feed. Chosen
-  with `--source`; `boto3` is imported lazily, only on the `s3` path, and the
-  request is unsigned (public objects only). This is a code-challenge showcase of
-  the adapter pattern applied to external I/O beyond the matcher — the S3 path is
-  not otherwise needed for the given HTTPS sources.
+- **`ByteSource`** — the byte-stream transport for the **seller feed only**
+  (`http` via `requests` / `s3` via `boto3` `get_object`). Chosen with `--source`;
+  `boto3` is imported lazily, only on the `s3` path, and the request is unsigned
+  (public objects only). This is a code-challenge showcase of the adapter pattern
+  applied to external I/O beyond the matcher — the S3 path is not otherwise needed
+  for the given HTTPS sources. The **catalog download stays on plain `requests`**:
+  it writes a temp file that is often largely rolled back by the schema refactor,
+  so there is no value in making that transport swappable.
 
 Neither `similarity`, `threshold`, `requests` nor `boto3` is threaded layer by
 layer; no DI container, no framework. The similarity backend + threshold ride
 down the call chain inside the `ProductIdentityResolver`; the `ByteSource` is
-passed to `PrepareCatalogDatabaseUseCase` and `ConsolidateCatalogUseCase`.
+passed only to `ConsolidateCatalogUseCase` (and on to `iter_feed`).
 
 ```python
 # consolidation/services.py — the port (a domain-owned contract)
@@ -250,8 +254,8 @@ def build_source(name: str) -> ByteSource:
 
 # consolidation/cli.py — composition root: build the collaborators once, inject them
 resolver = ProductIdentityResolver(build_similarity(config["matcher"]), threshold)
-source = build_source(config["source"])
-PrepareCatalogDatabaseUseCase(repository, source).execute(catalog_url, dest_dir)
+source = build_source(config["source"])          # seller-feed transport only
+PrepareCatalogDatabaseUseCase(repository).execute(catalog_url, dest_dir)   # download_to: plain requests
 ConsolidateCatalogUseCase(repository, resolver, source).execute(prepared, products_url, output)
 #   -> ConsolidateFeedUseCase(repositories, resolver).execute(feed)   # feed = iter_feed(url, source)
 #   -> ConsolidateEntryUseCase(repositories, resolver)   # resolver.resolve(catalog, submission)
@@ -270,9 +274,9 @@ The composition root (`cli`) runs the two use cases in order.
 
 1. Resolve and validate configuration (CLI plus `.env` next to the entry point); the
    composition root builds the `ProductIdentityResolver` (backend + threshold), the
-   `ByteSource` (`http`/`s3`) and the `SqliteCatalogRepository`.
+   feed `ByteSource` (`http`/`s3`) and the `SqliteCatalogRepository`.
 2. **`PrepareCatalogDatabaseUseCase`** — download `catalog.db` in chunks to a temp
-   file (fresh every run) through the injected `ByteSource`, then drive an injected
+   file (fresh every run) over plain HTTP(S) with `requests`, then drive an injected
    `CatalogRepository` port
    (`verify_database` → `connect` → `begin` → `classify_source` → `upgrade` →
    `commit`/`rollback` → `enable_foreign_keys`); the use case never sees SQLAlchemy,

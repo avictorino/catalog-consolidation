@@ -24,7 +24,7 @@ paths vary between executions:
 
 ```text
 HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db source=http matcher=rapidfuzz threshold=0.9
-HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db via=http dest=<workspace>/.catalog-<hash>.db.tmp
+HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<workspace>/.catalog-<hash>.db.tmp
 HH:MM:SS [INFO] download complete bytes=61440
 HH:MM:SS [INFO] source classified as=legacy
 HH:MM:SS [INFO] extracted reference table=Brand rows=637
@@ -93,9 +93,9 @@ A small, educational DDD layering — one module per layer (details and diagrams
 | `services.py` | domain services / ports | `ProductIdentityResolver` (the identity rules), the `Similarity` port, and the `ByteSource` port |
 | `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories` — the only code that touches the DB connection (`load_catalog`, `entry_transaction()`, `reload()`) |
 | `schema.py` | persistence schema | SQLAlchemy `Table` metadata only |
-| `infrastructure.py` | infrastructure | byte-stream transports (`HttpByteSource` / `S3ByteSource`), catalog download, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, and `SqliteCatalogRepository` |
+| `infrastructure.py` | infrastructure | catalog download (`requests`), feed byte-stream transports (`HttpByteSource` / `S3ByteSource`), streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, and `SqliteCatalogRepository` |
 | `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, the `ConsolidateCatalogUseCase` coordinator, and the `CatalogRepository` port |
-| `cli.py` | interface / composition root | resolves config, builds the resolver + byte source + repository, runs the two use cases in order |
+| `cli.py` | interface / composition root | resolves config, builds the resolver + feed byte source + repository, runs the two use cases in order |
 
 Dependencies point inward: `cli → usecase → services → domain`, with `repository`
 and `infrastructure` implementing the ports the use cases declare. `domain.py`
@@ -106,22 +106,25 @@ imports nothing from the project; `schema.py` has no function that takes a
 `cli.py` injects three collaborators: one `CatalogRepository` (prepares the
 database, then hands out the `CatalogRepositories` bundle), one
 `ProductIdentityResolver` (carrying the similarity backend and the threshold), and
-one `ByteSource` (the transport both the catalog download and the feed read
-through — `HttpByteSource` or `S3ByteSource`). Nothing threads `similarity`,
+one `ByteSource` — the transport the **seller feed** streams through
+(`HttpByteSource` or `S3ByteSource`). The catalog download stays on plain
+`requests`, so only the feed transport is swappable and a large part of the
+catalog work can roll back independently of it. Nothing threads `similarity`,
 `threshold` or `requests`/`boto3` from layer to layer.
 
 Run flow: `cli` resolves config → `PrepareCatalogDatabaseUseCase` downloads and
-migrates `catalog.db`, leaving the repository connected with foreign keys on →
-`ConsolidateCatalogUseCase` streams the feed through `ConsolidateFeedUseCase`
-(one transaction per entry) and publishes the output atomically on success.
+migrates `catalog.db` (plain HTTP), leaving the repository connected with foreign
+keys on → `ConsolidateCatalogUseCase` streams the feed through the injected
+`ByteSource` and `ConsolidateFeedUseCase` (one transaction per entry) and
+publishes the output atomically on success.
 
 ## Inputs and output
 
 | What | Default source |
 | --- | --- |
-| Base catalog | `catalog.db` on S3 (`--catalog-url`) |
+| Base catalog | `catalog.db` on S3 (`--catalog-url`) — always fetched over HTTP(S) |
 | Seller feed | `ProductEntry.json` on S3 (`--products-url`) |
-| Transport | `http` — `requests` over HTTPS (`--source`; `s3` uses `boto3`) |
+| Feed transport | `http` — `requests` (`--source`; `s3` streams the feed with `boto3`) |
 | Output | `catalog_output.db` in the working directory (`--output`) |
 
 Every run downloads a fresh copy of the base catalog, **refactors its schema** (see
@@ -153,22 +156,22 @@ python -m consolidation.cli \
 ```
 
 - Every option has a default in `.env` (copied from `.env.example`), so a bare
-  `python -m consolidation.cli` runs against the S3 sources over `http` with
-  `rapidfuzz` at `0.90`.
-- `--source` selects the byte-stream transport used for **both** URLs: `http`
-  (default, `requests` over HTTPS) or `s3` (`boto3` `get_object`, unsigned — the
-  objects must be publicly readable). For `s3`, point the URLs at
-  `s3://bucket/key` or an `…amazonaws.com` host. Both implement the same
-  `open(ref) -> stream` contract (`services.ByteSource`), the same way the
-  matchers implement `Similarity`.
+  `python -m consolidation.cli` runs against the S3 sources with the feed over
+  `http` and `rapidfuzz` at `0.90`.
+- `--source` selects the byte-stream transport for the **seller feed only**: `http`
+  (default, `requests`) or `s3` (`boto3` `get_object`, unsigned — the object must
+  be publicly readable). The catalog download is always plain HTTP(S). Under
+  `--source s3`, `--products-url` may be `s3://bucket/key` or an `…amazonaws.com`
+  URL (rewritten to `s3://bucket/key` at config time). Both transports implement
+  the same `open(ref) -> stream` contract (`services.ByteSource`), the same way
+  the matchers implement `Similarity`.
 - `--matcher` selects the similarity backend: `rapidfuzz` (default) or `difflib`
   (optional fallback). Both implement the same `score(a, b) -> float` contract.
 - `--threshold` overrides the backend's suggested cutoff and the `.env` value.
 
 ```bash
-# same run, streamed through boto3 instead of requests
+# same run, feed streamed through boto3 instead of requests
 python -m consolidation.cli --source s3 \
-  --catalog-url s3://engineering-hiring-process/catalog.db \
   --products-url s3://engineering-hiring-process/ProductEntry.json
 ```
 

@@ -79,7 +79,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="destination path for the consolidated database")
     # Validate in _resolve so invalid CLI values go through the same logged error path
     # as invalid values loaded from .env.
-    parser.add_argument("--source", help="byte-stream transport for both URLs: http or s3")
+    parser.add_argument("--source", help="seller-feed byte-stream transport: http or s3")
     parser.add_argument("--matcher", help="similarity backend")
     parser.add_argument("--threshold", help="fuzzy cutoff, a float in [0, 1]")
     return parser
@@ -109,15 +109,29 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     if source not in SOURCES:
         raise _ConfigError(f"source must be one of {SOURCES}, got: {source!r}")
 
+    # The catalog download is always plain HTTP(S); only the seller feed honours --source.
     for name, url in (("catalog-url", catalog_url), ("products-url", products_url)):
+        if name == "products-url" and source == "s3":
+            continue
         scheme = urlparse(url).scheme
-        if source == "s3":
-            if scheme not in ("s3", "https"):
-                raise _ConfigError(f"{name} must be s3:// or https:// when source=s3, got: {url!r}")
-        elif scheme == "http":
+        if scheme == "http":
             logger.warning("non-TLS URL key=%s url=%s", name, url)
         elif scheme != "https":
             raise _ConfigError(f"{name} must be an http(s) URL, got: {url!r}")
+
+    if source == "s3":
+        # Accept s3:// as-is; rewrite an http(s) …amazonaws.com feed URL to s3://bucket/key.
+        try:
+            bucket, key = infrastructure.parse_s3_ref(products_url)
+        except ValueError as exc:
+            raise _ConfigError(
+                f"products-url must be an s3:// or amazonaws.com URL when source=s3, "
+                f"got: {products_url!r}"
+            ) from exc
+        rewritten = f"s3://{bucket}/{key}"
+        if rewritten != products_url:
+            logger.info("rewrote products-url for source=s3 url=%s -> %s", products_url, rewritten)
+        products_url = rewritten
 
     if matcher not in MATCHERS:
         raise _ConfigError(f"matcher must be one of {MATCHERS}, got: {matcher!r}")
@@ -161,11 +175,11 @@ def main(argv: list[str] | None = None) -> int:
     resolver = ProductIdentityResolver(
         infrastructure.build_similarity(config["matcher"]), config["threshold"]
     )
-    source = infrastructure.build_source(config["source"])
+    source = infrastructure.build_source(config["source"])  # seller-feed transport only
     repository = infrastructure.SqliteCatalogRepository()
     output = config["output"]
     try:
-        prepared = usecase.PrepareCatalogDatabaseUseCase(repository, source).execute(
+        prepared = usecase.PrepareCatalogDatabaseUseCase(repository).execute(
             config["catalog_url"], output.parent
         )
     except Exception:

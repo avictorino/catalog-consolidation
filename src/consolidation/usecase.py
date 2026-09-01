@@ -256,20 +256,19 @@ class PrepareCatalogDatabaseUseCase:
     file ready to be consolidated.
 
     Every database-specific step goes through the injected
-    :class:`CatalogRepository`; this use case does not know it is SQLite, and the
-    catalog bytes arrive through the injected ``ByteSource`` (HTTP or S3), so it
-    does not know the transport either. On success the repository is left
+    :class:`CatalogRepository`; this use case does not know it is SQLite. The
+    catalog is always downloaded over plain HTTP(S) (`requests`) — the swappable
+    transport is the seller feed's, not this. On success the repository is left
     **connected** (with foreign keys enabled) so the next use case consumes on the
     same connection — the caller owns closing it. On any failure the repository is
     closed and the partial file deleted.
     """
 
-    def __init__(self, repository: CatalogRepository, source: ByteSource) -> None:
+    def __init__(self, repository: CatalogRepository) -> None:
         self.repository = repository
-        self.source = source
 
     def execute(self, catalog_url: str, dest_dir: str | Path) -> Path:
-        tmp = download_to(catalog_url, dest_dir, self.source)
+        tmp = download_to(catalog_url, dest_dir)
         try:
             self.repository.verify_database(tmp)
             self.repository.connect(tmp)

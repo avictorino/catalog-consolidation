@@ -2,8 +2,8 @@
 outside the repositories.
 
 Everything that talks to something external or runs SQL against the connection:
-the catalog download and the streamed seller feed, the byte-stream transports
-they read through (``HttpByteSource`` / ``S3ByteSource``, adapters for the
+the catalog download and the streamed seller feed, the byte-stream transports the
+feed reads through (``HttpByteSource`` / ``S3ByteSource``, adapters for the
 ``services.ByteSource`` port), the anti-corruption layer (``ProductEntry``), the
 SQL-injection screen, the concrete similarity backends, the Alembic wiring, the
 schema-refactor steps the Alembic revision executes (source classification + the
@@ -56,9 +56,11 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
 
 # --------------------------------------------------------------------------- #
-# Byte-stream transports for the ``services.ByteSource`` port. Both the catalog
-# download and the seller feed read through one of these; the choice is made at
-# the composition root and injected, exactly like the similarity backend.
+# Byte-stream transports for the ``services.ByteSource`` port. The **seller feed**
+# reads through one of these; the choice is made at the composition root and
+# injected, exactly like the similarity backend. (The catalog download stays on
+# plain ``requests`` — see ``download_to`` — so only the feed transport is
+# swappable.)
 # --------------------------------------------------------------------------- #
 class HttpByteSource:
     """Stream an object over HTTP(S) with ``requests``."""
@@ -69,7 +71,6 @@ class HttpByteSource:
     def open(self, ref: str) -> Iterator[BinaryIO]:
         with requests.get(ref, stream=True, timeout=_TIMEOUT) as response:
             response.raise_for_status()
-            response.raw.decode_content = True  # transparently undo any transfer encoding
             yield response.raw
 
 
@@ -137,21 +138,25 @@ def build_source(name: str) -> ByteSource:
 # --------------------------------------------------------------------------- #
 # Catalog download
 # --------------------------------------------------------------------------- #
-def download_to(url: str, dest_dir: Path, source: ByteSource) -> Path:
+def download_to(url: str, dest_dir: Path) -> Path:
     """Stream ``url`` in chunks into a fresh temp file inside ``dest_dir``.
 
-    The body is never held whole in memory. Returns the temp file path.
+    The response body is never held whole in memory. Returns the temp file path.
+    Always plain ``requests`` — the swappable transport is the feed's, not this.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     tmp = dest_dir / f".catalog-{uuid.uuid4().hex}.db.tmp"
-    logger.info("downloading catalog url=%s via=%s dest=%s", url, source.name, tmp)
+    logger.info("downloading catalog url=%s dest=%s", url, tmp)
 
     bytes_written = 0
     try:
-        with source.open(url) as stream, tmp.open("wb") as handle:
-            while chunk := stream.read(_CHUNK):
-                handle.write(chunk)
-                bytes_written += len(chunk)
+        with requests.get(url, stream=True, timeout=_TIMEOUT) as response:
+            response.raise_for_status()
+            with tmp.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=_CHUNK):
+                    if chunk:
+                        handle.write(chunk)
+                        bytes_written += len(chunk)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise

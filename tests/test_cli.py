@@ -126,25 +126,49 @@ def test_unknown_source_rejected(env_file: Path) -> None:
         cli._resolve(cli._build_parser().parse_args([]))
 
 
-def test_s3_source_accepts_s3_urls(env_file: Path) -> None:
+def test_s3_source_only_affects_the_feed_url(env_file: Path) -> None:
     _write_env(
         env_file,
         {
             **FULL_ENV,
             "SOURCE": "s3",
-            "CATALOG_URL": "s3://bucket/catalog.db",
+            "CATALOG_URL": "https://example.com/catalog.db",  # still plain HTTP(S)
             "PRODUCTS_URL": "s3://bucket/ProductEntry.json",
         },
     )
     config = cli._resolve(cli._build_parser().parse_args([]))
     assert config["source"] == "s3"
-    assert config["catalog_url"] == "s3://bucket/catalog.db"
+    assert config["catalog_url"] == "https://example.com/catalog.db"
+    assert config["products_url"] == "s3://bucket/ProductEntry.json"
 
 
-def test_s3_source_rejects_plain_http_url(env_file: Path) -> None:
+def test_s3_source_rewrites_amazonaws_feed_url_to_s3_scheme(env_file: Path) -> None:
     _write_env(
         env_file,
-        {**FULL_ENV, "SOURCE": "s3", "CATALOG_URL": "http://bucket/catalog.db"},
+        {
+            **FULL_ENV,
+            "SOURCE": "s3",
+            "PRODUCTS_URL": "https://s3.us-east-1.amazonaws.com/engineering-hiring-process/ProductEntry.json",
+        },
     )
-    with pytest.raises(cli._ConfigError, match="s3:// or https://"):
+    config = cli._resolve(cli._build_parser().parse_args([]))
+    assert config["catalog_url"] == "https://example.com/catalog.db"  # untouched
+    assert config["products_url"] == "s3://engineering-hiring-process/ProductEntry.json"
+
+
+def test_s3_source_rejects_non_s3_feed_url(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {**FULL_ENV, "SOURCE": "s3", "PRODUCTS_URL": "http://bucket/ProductEntry.json"},
+    )
+    with pytest.raises(cli._ConfigError, match="s3:// or amazonaws.com URL"):
+        cli._resolve(cli._build_parser().parse_args([]))
+
+
+def test_s3_source_still_validates_catalog_url_as_http(env_file: Path) -> None:
+    _write_env(
+        env_file,
+        {**FULL_ENV, "SOURCE": "s3", "CATALOG_URL": "s3://bucket/catalog.db"},
+    )
+    with pytest.raises(cli._ConfigError, match="catalog-url must be an http"):
         cli._resolve(cli._build_parser().parse_args([]))

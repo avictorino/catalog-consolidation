@@ -116,15 +116,18 @@ Verify:
 - `--threshold` overrides the backend default and changes outcomes at the boundary
   (`Roteador/Router` at `0.909`: included at `0.90`, excluded at `0.91`).
 
-### Byte-stream transport
+### Seller-feed byte-stream transport
 
-- The feed and download test suites pass with both `HttpByteSource` and `S3ByteSource`.
-- A full run with `--source s3` against `s3://…` URLs produces the same tables as
-  the default `--source http` run.
+- The feed test suite passes with both `HttpByteSource` and `S3ByteSource`.
+- A full run with `--source s3` and an `s3://` (or `…amazonaws.com`) feed URL
+  produces the same tables as the default `--source http` run; the catalog URL is
+  still fetched over HTTP(S).
 - `--source http` runs without `boto3` reachable at import time (it is imported
   lazily, only inside `S3ByteSource.open`).
-- An unknown `--source`, or a URL whose scheme does not match the selected source,
-  aborts the run with a logged `ERROR`.
+- An unknown `--source`, a non-HTTP(S) `--catalog-url`, or a `--products-url` that
+  is not an S3 reference under `--source s3`, aborts the run with a logged `ERROR`.
+- Under `--source s3`, an `…amazonaws.com` `--products-url` is rewritten to
+  `s3://bucket/key` (logged at `INFO`).
 
 ### Security
 

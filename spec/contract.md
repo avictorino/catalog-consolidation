@@ -9,18 +9,21 @@ Entry point: `python -m consolidation.cli`.
 
 | Option | `.env` key | `.env.example` value | Meaning |
 | --- | --- | --- | --- |
-| `--catalog-url` | `CATALOG_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db` | URL of the base SQLite catalog |
+| `--catalog-url` | `CATALOG_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db` | HTTP(S) URL of the base SQLite catalog |
 | `--products-url` | `PRODUCTS_URL` | `https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json` | URL of the seller feed |
 | `--output` | `OUTPUT` | `catalog_output.db` (in the current working directory) | destination path for the consolidated database |
-| `--source` | `SOURCE` | `http` | byte-stream transport for both URLs: `http` or `s3` |
+| `--source` | `SOURCE` | `http` | byte-stream transport for the **seller feed only**: `http` or `s3` |
 | `--matcher` | `MATCHER` | `rapidfuzz` | similarity backend: `rapidfuzz` (default) or `difflib` |
 | `--threshold` | `THRESHOLD` | `0.90` | float in `[0, 1]`; the fuzzy cutoff |
 
-- `--source http` (default) accepts only HTTP(S) URLs for `--catalog-url` and
-  `--products-url`; a non-TLS `http://` URL is allowed but logged as a warning.
-- `--source s3` streams both objects with `boto3` `get_object` **unsigned** (the
-  objects must be publicly readable, no credentials resolved). URLs must then be
-  `s3://bucket/key` or an `…amazonaws.com` HTTP(S) URL.
+- `--catalog-url` is always fetched over HTTP(S) with `requests`; only HTTP(S)
+  URLs are accepted and a non-TLS `http://` URL is allowed but logged as a warning.
+- `--source http` (default) also reads `--products-url` over HTTP(S).
+- `--source s3` streams the **feed** with `boto3` `get_object` **unsigned** (the
+  object must be publicly readable, no credentials resolved). `--products-url`
+  must then be `s3://bucket/key` or an `…amazonaws.com` HTTP(S) URL; the latter is
+  rewritten to `s3://bucket/key` at config time (logged at `INFO`). The catalog
+  URL is unaffected by `--source`.
 - Local files are not supported in this version.
 
 ### Configuration resolution
@@ -125,20 +128,24 @@ this point.
 
 ## 4. Input transport
 
-- Both URLs are read through one `ByteSource` (in `consolidation.services`),
-  selected by `--source` at the composition root and injected into
-  `PrepareCatalogDatabaseUseCase` and `ConsolidateCatalogUseCase`. The use cases,
-  `download_to` and `iter_feed` never import `requests` or `boto3`.
+- The **catalog** is always downloaded with plain `requests` (`download_to`). It
+  writes a temp file the schema refactor then largely rewrites, so that transport
+  is deliberately not swappable.
+- The **seller feed** is read through one `ByteSource` (in
+  `consolidation.services`), selected by `--source` at the composition root and
+  injected into `ConsolidateCatalogUseCase` (and on to `iter_feed`). The use case
+  and `iter_feed` never import `requests` or `boto3`.
 - `HttpByteSource` (`--source http`) streams with `requests` and is the default.
   `S3ByteSource` (`--source s3`) streams with `boto3` `get_object`, signature
-  version `UNSIGNED` — no credential chain is consulted and the objects must be
+  version `UNSIGNED` — no credential chain is consulted and the object must be
   public. `boto3` is imported lazily inside `S3ByteSource.open`, so
   `--source http` must not require it.
 - `parse_s3_ref` accepts `s3://bucket/key`, virtual-hosted
   `https://bucket.s3.<region>.amazonaws.com/key`, and path-style
-  `https://s3.<region>.amazonaws.com/bucket/key`.
+  `https://s3.<region>.amazonaws.com/bucket/key`. When `--source s3` is set, the
+  CLI normalizes `--products-url` to the `s3://bucket/key` form up front.
 - Both transports satisfy the identical `open(ref) -> context-managed binary
-  stream` contract and pass the same feed/download test suite.
+  stream` contract and pass the same feed test suite.
 
 ## 5. Persistence
 
