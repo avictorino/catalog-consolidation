@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from difflib import SequenceMatcher
+from functools import cached_property
 from pathlib import Path
 from typing import BinaryIO, Literal
 from urllib.parse import urlparse
@@ -36,6 +37,7 @@ import libinjection
 import requests
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine, Transaction
@@ -45,6 +47,9 @@ from consolidation.repository import CatalogRepositories
 from consolidation.services import ByteSource, Similarity
 
 logger = logging.getLogger("consolidation")
+
+# Same file cli.py resolves .env against (two levels up from this package).
+_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 _TIMEOUT = (10, 60)  # (connect, read) seconds
 _PROBE_SIZE = 64 * 1024
@@ -307,18 +312,54 @@ def screen_entry(entry: ProductEntry, record_index: int) -> ThreatFinding | None
 
 # --------------------------------------------------------------------------- #
 # Concrete similarity backends for the ``services.Similarity`` port.
+#
+# The fuzzy cutoff is not a parameter threaded through the app: it lives in
+# ``.env`` (``THRESHOLD``) and is read here, lazily, the first time a backend
+# needs it — falling back to the backend's ``suggested_threshold``.
 # --------------------------------------------------------------------------- #
-class DifflibSimilarity:
-    name = "difflib"
+def _configured_threshold(default: float) -> float:
+    raw = dotenv_values(_ENV_PATH).get("THRESHOLD")
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"THRESHOLD must be a float in [0, 1], got: {raw!r}") from exc
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"THRESHOLD must be in [0, 1], got: {value}")
+    return value
+
+
+class _Similarity:
+    """Shared threshold resolution for the concrete backends.
+
+    ``threshold`` is resolved once, on first access: an explicit value passed to
+    the constructor (used by tests) wins, otherwise ``THRESHOLD`` from ``.env``,
+    otherwise ``suggested_threshold``.
+    """
+
+    name: str
     suggested_threshold = 0.90
+
+    def __init__(self, threshold: float | None = None) -> None:
+        self._threshold_override = threshold
+
+    @cached_property
+    def threshold(self) -> float:
+        if self._threshold_override is not None:
+            return self._threshold_override
+        return _configured_threshold(self.suggested_threshold)
+
+
+class DifflibSimilarity(_Similarity):
+    name = "difflib"
 
     def score(self, a: str, b: str) -> float:
         return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
-class RapidFuzzSimilarity:
+class RapidFuzzSimilarity(_Similarity):
     name = "rapidfuzz"
-    suggested_threshold = 0.90
 
     def score(self, a: str, b: str) -> float:
         from rapidfuzz import fuzz

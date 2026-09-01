@@ -177,7 +177,7 @@ def _run(output: Path, *, threshold: float = 0.90) -> int:
     """Wire the use cases the way ``cli.main`` does: prepare, then consolidate."""
     output = Path(output)
     repository = SqliteCatalogRepository()
-    resolver = ProductIdentityResolver(DifflibSimilarity(), threshold)
+    resolver = ProductIdentityResolver(DifflibSimilarity(threshold))
     try:
         prepared = PrepareCatalogDatabaseUseCase(repository).execute(_CATALOG_URL, output.parent)
     except Exception:
@@ -497,7 +497,7 @@ def test_consolidate_feed_use_case_links_into_prepared_db(migrated_db: Path) -> 
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys = ON")
             report = ConsolidateFeedUseCase(
-                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(0.90))
             ).execute(iter(entries))
     finally:
         engine.dispose()

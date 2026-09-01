@@ -14,7 +14,9 @@ Entry point: `python -m consolidation.cli`.
 | `--output` | `OUTPUT` | `catalog_output.db` (in the current working directory) | destination path for the consolidated database |
 | `--source` | `SOURCE` | `http` | byte-stream transport for the **seller feed only**: `http` or `s3` |
 | `--matcher` | `MATCHER` | `rapidfuzz` | similarity backend: `rapidfuzz` (default) or `difflib` |
-| `--threshold` | `THRESHOLD` | `0.90` | float in `[0, 1]`; the fuzzy cutoff |
+
+There is no `--threshold` CLI option. `THRESHOLD` in `.env` is optional and read
+directly by the similarity backend — see §7.
 
 - `--catalog-url` is always fetched over HTTP(S) with `requests`; only HTTP(S)
   URLs are accepted and a non-TLS `http://` URL is allowed but logged as a warning.
@@ -36,9 +38,10 @@ in `.env`**. There is no environment-variable layer and there are no built-in fa
 - If an option is set in **neither** the CLI nor `.env`, the run is invalid: an
   `ERROR` is logged and the process exits non-zero before any work starts. A missing
   `.env` file is treated the same as an empty one.
-- Invalid values (unknown `--matcher`, unknown `--source`, non-float or
-  out-of-range `--threshold`, a URL whose scheme does not match the selected
-  source) are also logged as `ERROR` and abort the run.
+- Invalid values (unknown `--matcher`, unknown `--source`, a URL whose scheme
+  does not match the selected source) are also logged as `ERROR` and abort the
+  run before any work starts. A non-float or out-of-range `THRESHOLD` is **not**
+  caught here — see §7.
 
 ## 2. Input validation (seller feed)
 
@@ -109,7 +112,7 @@ this point.
    - both brands, after normalization, are equal — when both are present;
    - same number of whitespace-separated tokens;
    - the multiset of tokens that contain a digit is equal;
-   - `score >= threshold`.
+   - `score >= similarity.threshold` (§7 — the backend's own resolved cutoff).
 
 ### Outcomes
 
@@ -210,12 +213,21 @@ Normative requirements:
 
 - Both implementations satisfy the identical `score(a, b) -> float` (`[0, 1]`) contract
   and pass the same test suite.
-- The backend is chosen in the CLI, wrapped together with the threshold in a
-  `ProductIdentityResolver`, and that single resolver is injected into the use cases.
-  `rapidfuzz` is imported lazily — `--matcher difflib` must not require it.
+- The backend is chosen in the CLI (`--matcher`), wrapped in a `ProductIdentityResolver`
+  with **no threshold argument**, and that single resolver is injected into the use
+  cases. `rapidfuzz` is imported lazily — `--matcher difflib` must not require it.
+- **Threshold resolution is the backend's own responsibility, not a parameter passed
+  in.** Each backend exposes `threshold: float`, a `functools.cached_property`
+  resolved on first access: an explicit constructor value if given (tests only), else
+  `THRESHOLD` read from `.env`, else `suggested_threshold` (`0.90` for both backends).
+  Resolution happens the first time the fuzzy stage runs, not at startup — a malformed
+  `THRESHOLD` (non-float or outside `[0, 1]`) surfaces as a `ValueError` at that point,
+  not during CLI configuration resolution (§1). Once resolved, the value is cached for
+  the life of the backend instance — editing `.env` mid-run has no effect.
 - `fuzz.WRatio` / `token_set_ratio` / `token_sort_ratio` are disallowed.
 - Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan.
-- The `ByteSource` transport (§4) follows the same port/adapter/lazy-import shape.
+- The `ByteSource` transport (§4) follows the same port/adapter/lazy-import shape,
+  but is chosen via `--source`/`SOURCE`, unlike the threshold.
 
 ## 8. Report and exit codes
 

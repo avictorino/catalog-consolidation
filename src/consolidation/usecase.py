@@ -397,9 +397,9 @@ class ConsolidateCatalogUseCase:
 
     Injected collaborators: ``repository`` (the ``CatalogRepository`` — source of
     both the live connection and the per-aggregate bundle), ``resolver`` (a ready
-    ``ProductIdentityResolver``, already carrying the similarity backend and the
-    threshold) and ``source`` (the ``ByteSource`` transport the feed streams
-    through).
+    ``ProductIdentityResolver``, already carrying the similarity backend, which
+    resolves its own threshold) and ``source`` (the ``ByteSource`` transport the
+    feed streams through).
     """
 
     def __init__(
@@ -425,7 +425,7 @@ class ConsolidateCatalogUseCase:
             products_url,
             self.source.name,
             self.resolver.similarity.name,
-            self.resolver.threshold,
+            self.resolver.similarity.threshold,
         )
         published = False
         try:

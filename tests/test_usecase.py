@@ -16,8 +16,13 @@ from .conftest import PRODUCT_ROWS
 
 
 @pytest.fixture(params=(DifflibSimilarity, RapidFuzzSimilarity), ids=("difflib", "rapidfuzz"))
-def similarity(request: pytest.FixtureRequest) -> Similarity:
-    return request.param()
+def similarity_cls(request: pytest.FixtureRequest) -> type[Similarity]:
+    return request.param
+
+
+@pytest.fixture
+def similarity(similarity_cls: type[Similarity]) -> Similarity:
+    return similarity_cls(0.90)
 
 
 @pytest.mark.parametrize(
@@ -29,12 +34,12 @@ def similarity(request: pytest.FixtureRequest) -> Similarity:
     ],
 )
 def test_reordered_words_resolve_without_lowering_threshold(
-    similarity: Similarity, catalog_name: str, feed_name: str
+    similarity_cls: type[Similarity], catalog_name: str, feed_name: str
 ) -> None:
     expected = Product("existing", catalog_name, "Brand")
     entry = ProductEntry(Id="sku", SellerName="seller", Name=feed_name, Brand="BRAND")
 
-    product, reason, score = resolve_product(Catalog([expected]), entry, similarity, 1.0)
+    product, reason, score = resolve_product(Catalog([expected]), entry, similarity_cls(1.0))
 
     assert product == expected
     assert reason is None
@@ -58,7 +63,7 @@ def test_word_order_does_not_ignore_product_attributes(
     catalog = Catalog([Product("existing", catalog_name, "Brand")])
     entry = ProductEntry(Id="sku", SellerName="seller", Name=feed_name, Brand="Brand")
 
-    product, reason, score = resolve_product(catalog, entry, similarity, 0.90)
+    product, reason, score = resolve_product(catalog, entry, similarity)
 
     assert product is None
     assert reason is None
@@ -91,7 +96,7 @@ def test_word_order_requires_one_brand_compatible_candidate(
         Id="sku", SellerName="seller", Name="Galaxy S23 Smartphone", Brand="Samsung"
     )
 
-    product, reason, _ = resolve_product(catalog, entry, similarity, 0.90)
+    product, reason, _ = resolve_product(catalog, entry, similarity)
 
     assert (product.id if product else None) == expected_id
     assert reason == expected_reason
@@ -104,7 +109,7 @@ def test_word_order_match_takes_priority_over_fuzzy_candidate(similarity: Simila
         Id="sku", SellerName="seller", Name="Galaxy S23 Smartphone", Brand="Samsung"
     )
 
-    product, reason, score = resolve_product(catalog, entry, similarity, 0.90)
+    product, reason, score = resolve_product(catalog, entry, similarity)
 
     assert product == expected
     assert reason is None
@@ -118,11 +123,11 @@ def test_exact_name_still_takes_priority_over_word_order(similarity: Similarity)
         Id="sku", SellerName="seller", Name="Galaxy S23 Smartphone", Brand="Samsung"
     )
 
-    assert resolve_product(catalog, entry, similarity, 0.90)[0] == expected
+    assert resolve_product(catalog, entry, similarity)[0] == expected
 
 
 def test_new_product_is_reused_for_reordered_listing(
-    migrated_db: Path, similarity: Similarity
+    migrated_db: Path, similarity_cls: type[Similarity]
 ) -> None:
     entries = [
         ProductEntry(
@@ -138,7 +143,7 @@ def test_new_product_is_reused_for_reordered_listing(
             conn.exec_driver_sql("PRAGMA foreign_keys = ON")
             # third entry re-processes the reordered listing to prove idempotency
             report = ConsolidateFeedUseCase(
-                CatalogRepositories(conn), ProductIdentityResolver(similarity, 1.0)
+                CatalogRepositories(conn), ProductIdentityResolver(similarity_cls(1.0))
             ).execute(iter([*entries, entries[1]]))
 
             assert report.new == 1
@@ -169,8 +174,8 @@ def test_translation_resolves_with_both_matchers() -> None:
             "Category": "Networking",
         }
     )
-    for similarity in (DifflibSimilarity(), RapidFuzzSimilarity()):
-        product, reason, score = resolve_product(catalog, entry, similarity, 0.90)
+    for similarity in (DifflibSimilarity(0.90), RapidFuzzSimilarity(0.90)):
+        product, reason, score = resolve_product(catalog, entry, similarity)
         assert product is not None
         assert reason is None
         assert score == pytest.approx(0.909, abs=0.001)
@@ -187,7 +192,7 @@ def test_threshold_rejects_boundary_match() -> None:
             "Category": "Networking",
         }
     )
-    product, reason, score = resolve_product(catalog, entry, DifflibSimilarity(), 0.91)
+    product, reason, score = resolve_product(catalog, entry, DifflibSimilarity(0.91))
     assert product is None
     assert reason is None
     assert score is None
@@ -208,7 +213,7 @@ def test_importer_persists_links_idempotently(migrated_db: Path, caplog) -> None
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys = ON")
             report = ConsolidateFeedUseCase(
-                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(0.90))
             ).execute(iter([entry, entry.model_copy(update={"Id": "sku-2"})]))
 
             assert report.new == 0
@@ -244,7 +249,7 @@ def test_same_sku_cannot_be_reassociated(migrated_db: Path) -> None:
         with engine.connect() as conn:
             conn.exec_driver_sql("PRAGMA foreign_keys = ON")
             report = ConsolidateFeedUseCase(
-                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(), 0.90)
+                CatalogRepositories(conn), ProductIdentityResolver(DifflibSimilarity(0.90))
             ).execute(
                 iter(
                     [

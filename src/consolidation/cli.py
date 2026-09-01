@@ -81,7 +81,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # as invalid values loaded from .env.
     parser.add_argument("--source", help="seller-feed byte-stream transport: http or s3")
     parser.add_argument("--matcher", help="similarity backend")
-    parser.add_argument("--threshold", help="fuzzy cutoff, a float in [0, 1]")
     return parser
 
 
@@ -139,7 +138,6 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     output = pick("output")
     source = pick("source")
     matcher = pick("matcher")
-    threshold_raw = pick("threshold")
 
     if source not in SOURCES:
         raise _ConfigError(f"source must be one of {SOURCES}, got: {source!r}")
@@ -149,20 +147,12 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     if matcher not in MATCHERS:
         raise _ConfigError(f"matcher must be one of {MATCHERS}, got: {matcher!r}")
 
-    try:
-        threshold = float(threshold_raw)
-    except ValueError as exc:
-        raise _ConfigError(f"threshold must be a float, got: {threshold_raw!r}") from exc
-    if not 0.0 <= threshold <= 1.0:
-        raise _ConfigError(f"threshold must be in [0, 1], got: {threshold}")
-
     return {
         "catalog_url": catalog_url,
         "products_url": products_url,
         "output": Path(output).resolve(),
         "source": source,
         "matcher": matcher,
-        "threshold": threshold,
     }
 
 
@@ -175,19 +165,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("invalid configuration: %s", exc)
         return 2
     logger.info(
-        "configuration catalog_url=%s products_url=%s output=%s source=%s matcher=%s threshold=%s",
+        "configuration catalog_url=%s products_url=%s output=%s source=%s matcher=%s",
         config["catalog_url"],
         config["products_url"],
         config["output"],
         config["source"],
         config["matcher"],
-        config["threshold"],
     )
-    # Composition root: build the collaborators once (the resolver already carries
-    # the similarity backend and the threshold), then run the use cases in order.
-    resolver = ProductIdentityResolver(
-        infrastructure.build_similarity(config["matcher"]), config["threshold"]
-    )
+    # Composition root: build the collaborators once (the similarity backend
+    # resolves its own threshold from .env, lazily, on first use), then run the
+    # use cases in order.
+    resolver = ProductIdentityResolver(infrastructure.build_similarity(config["matcher"]))
     source = infrastructure.build_source(config["source"])  # seller-feed transport only
     repository = infrastructure.SqliteCatalogRepository()
     output = config["output"]

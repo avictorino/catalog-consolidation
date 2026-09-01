@@ -39,10 +39,17 @@ Rules that follow from the layering:
   inside `repository.py` and the `SqliteCatalogRepository` adapter.
 - The use cases receive collaborators built by `cli.py`: one `CatalogRepository`
   (prepares the DB and hands out the `CatalogRepositories` bundle), one
-  `ProductIdentityResolver` (wraps the `Similarity` backend and the threshold), and
-  one `ByteSource` (`http`/`s3`) — the **seller-feed** transport, passed only to
-  `ConsolidateCatalogUseCase`. The catalog download is plain `requests`. Nothing
-  threads `similarity`, `threshold`, `requests` or `boto3` layer by layer.
+  `ProductIdentityResolver` (wraps only the `Similarity` backend — **no**
+  threshold argument, there and nowhere else), and one `ByteSource` (`http`/`s3`)
+  — the **seller-feed** transport, passed only to `ConsolidateCatalogUseCase`.
+  The catalog download is plain `requests`. Nothing threads `similarity`,
+  `threshold`, `requests` or `boto3` layer by layer.
+- **The fuzzy threshold is not a parameter anywhere in the app.** It lives only
+  in `.env` (`THRESHOLD`, optional) and is resolved by the `Similarity` backend
+  itself — a `functools.cached_property` read on first use, falling back to
+  `suggested_threshold`. `cli.py` never parses, validates or logs a
+  `--threshold`; `ProductIdentityResolver`, `resolve_product` and
+  `_fuzzy_eligible` take no threshold argument — they read `similarity.threshold`.
 - The migration revision (`0001`) delegates to helpers in `consolidation.infrastructure`.
 
 ## Design constraints

@@ -8,7 +8,9 @@ import pytest
 import responses
 from moto import mock_aws
 
+from consolidation import infrastructure
 from consolidation.infrastructure import (
+    DifflibSimilarity,
     FeedError,
     FeedValidationError,
     HttpByteSource,
@@ -160,3 +162,47 @@ def test_screen_entry_rejects_injection_and_records_truncated_value(caplog) -> N
 def test_screen_entry_allows_benign_apostrophes() -> None:
     entry = ProductEntry.model_validate(_entry(Brand="Levi's", Name="iPad Pro 12.9''"))
     assert screen_entry(entry, 0) is None
+
+
+# --------------------------------------------------------------------------- #
+# Threshold: not a parameter anywhere upstream — the similarity backend
+# resolves it lazily, from THRESHOLD in .env, on first access.
+# --------------------------------------------------------------------------- #
+def test_threshold_falls_back_to_suggested_default_without_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(infrastructure, "_ENV_PATH", tmp_path / "missing.env")
+    assert DifflibSimilarity().threshold == DifflibSimilarity.suggested_threshold
+
+
+def test_threshold_is_read_from_env_on_first_use(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("THRESHOLD=0.75\n", encoding="utf-8")
+    monkeypatch.setattr(infrastructure, "_ENV_PATH", env_path)
+    assert DifflibSimilarity().threshold == pytest.approx(0.75)
+
+
+def test_threshold_is_cached_after_first_access(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("THRESHOLD=0.75\n", encoding="utf-8")
+    monkeypatch.setattr(infrastructure, "_ENV_PATH", env_path)
+    similarity = DifflibSimilarity()
+    assert similarity.threshold == pytest.approx(0.75)
+    env_path.write_text("THRESHOLD=0.10\n", encoding="utf-8")
+    assert similarity.threshold == pytest.approx(0.75)  # unchanged: resolved once
+
+
+def test_explicit_threshold_overrides_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("THRESHOLD=0.75\n", encoding="utf-8")
+    monkeypatch.setattr(infrastructure, "_ENV_PATH", env_path)
+    assert DifflibSimilarity(0.91).threshold == pytest.approx(0.91)
+
+
+@pytest.mark.parametrize("bad", ["1.5", "-0.1", "nope"])
+def test_bad_threshold_in_env_raises(monkeypatch: pytest.MonkeyPatch, tmp_path, bad: str) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"THRESHOLD={bad}\n", encoding="utf-8")
+    monkeypatch.setattr(infrastructure, "_ENV_PATH", env_path)
+    with pytest.raises(ValueError, match="THRESHOLD"):
+        _ = DifflibSimilarity().threshold

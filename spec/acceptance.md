@@ -20,10 +20,14 @@ tool must still be correct.
 ### Configuration
 
 - With the shipped `.env`, a bare `python -m consolidation.cli` resolves to the S3
-  sources over `http`, `catalog_output.db`, `rapidfuzz`, threshold `0.90`.
-- Every option has a key in `.env`; precedence holds: CLI > `.env`.
-- Removing `.env` entirely invalidates a bare run before any work starts.
-- A `THRESHOLD` in `.env` or the CLI overrides the backend's suggested value.
+  sources over `http`, `catalog_output.db`, `rapidfuzz`.
+- Every **CLI** option (`catalog-url`, `products-url`, `output`, `source`,
+  `matcher`) has a key in `.env`; precedence holds: CLI > `.env`. `THRESHOLD` is
+  not a CLI option — it is optional in `.env` and never overridable by a flag.
+- Removing `.env` entirely invalidates a bare run before any work starts (the
+  required keys are missing); an `.env` present but without `THRESHOLD` still runs.
+- A `THRESHOLD` in `.env` overrides the backend's `suggested_threshold`; there is
+  no CLI equivalent.
 - `.env` is located relative to the entry point even when the process runs from another
   directory.
 - A non-TLS `http://` source URL produces a `WARNING` and still runs.
@@ -113,8 +117,12 @@ Verify:
 
 - The same identity test suite passes with `--matcher difflib` and `--matcher rapidfuzz`.
 - `--matcher difflib` runs without `rapidfuzz` installed.
-- `--threshold` overrides the backend default and changes outcomes at the boundary
-  (`Roteador/Router` at `0.909`: included at `0.90`, excluded at `0.91`).
+- `THRESHOLD` in `.env` (there is no `--threshold` flag) changes outcomes at the
+  boundary (`Roteador/Router` at `0.909`: included at `0.90`, excluded at `0.91`).
+- The backend resolves `threshold` lazily and caches it: a `.env` edit after the
+  backend's first fuzzy comparison has no effect on that run.
+- A `THRESHOLD` that is not a float, or outside `[0, 1]`, raises when the backend
+  first needs it — not at CLI configuration time.
 
 ### Seller-feed byte-stream transport
 

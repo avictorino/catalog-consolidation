@@ -17,13 +17,14 @@ python -m consolidation.cli
 ```
 
 The default configuration uses the published S3 sources, writes
-`catalog_output.db`, uses `rapidfuzz`, and applies a fuzzy threshold of `0.90`.
+`catalog_output.db`, uses `rapidfuzz`, and — per `.env`'s `THRESHOLD` — applies a
+fuzzy threshold of `0.90`.
 
 An expected successful run has the following shape. Timestamps, UUIDs, and temporary
 paths vary between executions:
 
 ```text
-HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db source=http matcher=rapidfuzz threshold=0.9
+HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db source=http matcher=rapidfuzz
 HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<workspace>/.catalog-<hash>.db.tmp
 HH:MM:SS [INFO] download complete bytes=61440
 HH:MM:SS [INFO] source classified as=legacy
@@ -105,12 +106,12 @@ imports nothing from the project; `schema.py` has no function that takes a
 
 `cli.py` injects three collaborators: one `CatalogRepository` (prepares the
 database, then hands out the `CatalogRepositories` bundle), one
-`ProductIdentityResolver` (carrying the similarity backend and the threshold), and
-one `ByteSource` — the transport the **seller feed** streams through
-(`HttpByteSource` or `S3ByteSource`). The catalog download stays on plain
-`requests`, so only the feed transport is swappable and a large part of the
-catalog work can roll back independently of it. Nothing threads `similarity`,
-`threshold` or `requests`/`boto3` from layer to layer.
+`ProductIdentityResolver` (carrying the similarity backend, which resolves its
+own fuzzy threshold from `.env`), and one `ByteSource` — the transport the
+**seller feed** streams through (`HttpByteSource` or `S3ByteSource`). The catalog
+download stays on plain `requests`, so only the feed transport is swappable and a
+large part of the catalog work can roll back independently of it. Nothing
+threads `similarity`, `threshold` or `requests`/`boto3` from layer to layer.
 
 Run flow: `cli` resolves config → `PrepareCatalogDatabaseUseCase` downloads and
 migrates `catalog.db` (plain HTTP), leaving the repository connected with foreign
@@ -152,12 +153,12 @@ output.
 ```
 python -m consolidation.cli \
   [--catalog-url URL] [--products-url URL] [--output PATH] \
-  [--source http|s3] [--matcher difflib|rapidfuzz] [--threshold FLOAT]
+  [--source http|s3] [--matcher difflib|rapidfuzz]
 ```
 
 - Every option has a default in `.env` (copied from `.env.example`), so a bare
   `python -m consolidation.cli` runs against the S3 sources with the feed over
-  `http` and `rapidfuzz` at `0.90`.
+  `http` and `rapidfuzz`.
 - `--source` selects the byte-stream transport for the **seller feed only**: `http`
   (default, `requests`) or `s3` (`boto3` `get_object`, unsigned — the object must
   be publicly readable). The catalog download is always plain HTTP(S). Under
@@ -167,7 +168,10 @@ python -m consolidation.cli \
   the matchers implement `Similarity`.
 - `--matcher` selects the similarity backend: `rapidfuzz` (default) or `difflib`
   (optional fallback). Both implement the same `score(a, b) -> float` contract.
-- `--threshold` overrides the backend's suggested cutoff and the `.env` value.
+- **There is no `--threshold` flag.** The fuzzy cutoff is `THRESHOLD` in `.env`
+  only — the similarity backend reads it lazily, the first time it is used, and
+  falls back to its `suggested_threshold` (`0.90`) if the key is absent. To
+  change it, edit `.env`; nothing threads a threshold through the app.
 
 ```bash
 # same run, feed streamed through boto3 instead of requests
@@ -235,7 +239,8 @@ guarantee — the remote content may change.
 | Product identity | normalized `Name`, then identical word multisets regardless of order, then gated fuzzy matching; brand compatibility required; category and feed `Id` never define identity | preserve repeated words and model/capacity tokens; skip ambiguous matches; `Id` is a seller SKU |
 | Normalization | Python, shared by catalog / feed names, brands, categories | SQLite `lower()` is ASCII-only and cannot fold accents (`Câmera` → `camera`) |
 | SQL injection | `libinjection` screen; reject and count as `threat` | WAF-grade tokenizer, no false positive on `"Levi's"`; parameterized SQL is still the real defense |
-| Matcher backends | `rapidfuzz` by default; `difflib` remains available through the same `score()` contract | optimized fuzzy scoring without changing the matching rules; the backend is one of two ports (`Similarity`), wrapped with the threshold in a `ProductIdentityResolver` and injected at the CLI — no framework |
+| Matcher backends | `rapidfuzz` by default; `difflib` remains available through the same `score()` contract | optimized fuzzy scoring without changing the matching rules; the backend is one of two ports (`Similarity`), wrapped in a `ProductIdentityResolver` and injected at the CLI — no framework |
+| Fuzzy threshold | `THRESHOLD` in `.env` only, no `--threshold` flag; the `Similarity` backend resolves it lazily, on first use | not a parameter threaded through the call chain — it lives where it is consumed |
 | Ambiguous match | skip the row and report it, do not abort the import | one ambiguous row should not hide the outcome of the rest |
 | Transaction | schema refactor is committed first (`PrepareCatalogDatabaseUseCase`); then one transaction per feed entry via `CatalogRepositories.entry_transaction()` | failed entries roll back in isolation, the cache is reloaded, later entries continue, and failures are reported |
 

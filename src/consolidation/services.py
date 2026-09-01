@@ -19,10 +19,16 @@ from consolidation.domain import Catalog, Product, Submission, brands_compatible
 
 
 class Similarity(Protocol):
-    """Port: an interchangeable string-similarity backend (difflib / rapidfuzz)."""
+    """Port: an interchangeable string-similarity backend (difflib / rapidfuzz).
+
+    ``threshold`` is the effective fuzzy cutoff the backend resolved for itself
+    (from ``THRESHOLD`` in ``.env``, falling back to ``suggested_threshold``) —
+    nothing upstream of the backend threads a threshold value.
+    """
 
     name: str
     suggested_threshold: float
+    threshold: float
 
     def score(self, a: str, b: str) -> float:
         """Return a score in the inclusive range [0, 1] for two normalized strings."""
@@ -52,7 +58,6 @@ def _fuzzy_eligible(
     submission: Submission,
     product: Product,
     similarity: Similarity,
-    threshold: float,
 ) -> tuple[bool, float]:
     entry_name = normalize(submission.Name)
     product_name = product.normalized_name
@@ -63,14 +68,13 @@ def _fuzzy_eligible(
     if _digit_tokens(entry_name) != _digit_tokens(product_name):
         return False, 0.0
     score = similarity.score(entry_name, product_name)
-    return score >= threshold, score
+    return score >= similarity.threshold, score
 
 
 def resolve_product(
     catalog: Catalog,
     submission: Submission,
     similarity: Similarity,
-    threshold: float,
 ) -> tuple[Product | None, str | None, float | None]:
     """Resolve a submission to exactly one product.
 
@@ -110,7 +114,7 @@ def resolve_product(
 
     candidates: list[tuple[Product, float]] = []
     for product in catalog.products:
-        eligible, score = _fuzzy_eligible(submission, product, similarity, threshold)
+        eligible, score = _fuzzy_eligible(submission, product, similarity)
         if eligible:
             candidates.append((product, score))
 
@@ -146,14 +150,11 @@ class Resolution:
 class ProductIdentityResolver:
     """Domain service: given the catalog, decide what a submission refers to."""
 
-    def __init__(self, similarity: Similarity, threshold: float) -> None:
+    def __init__(self, similarity: Similarity) -> None:
         self.similarity = similarity
-        self.threshold = threshold
 
     def resolve(self, catalog: Catalog, submission: Submission) -> Resolution:
-        product, reason, score = resolve_product(
-            catalog, submission, self.similarity, self.threshold
-        )
+        product, reason, score = resolve_product(catalog, submission, self.similarity)
         return Resolution(product, reason, score)
 
 

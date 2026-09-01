@@ -51,7 +51,7 @@ Seven modules, one per layer — full walkthrough in
 | Module | Layer | What it holds |
 | --- | --- | --- |
 | `domain.py` | domain | `normalize` / `new_uuid` / `brands_compatible`, the `Product` and `Catalog` entities, the `Submission` contract — no project or I/O imports |
-| `services.py` | domain services / ports | `resolve_product` (the identity rules) wrapped by the `ProductIdentityResolver` facade (backend + threshold); the `Similarity` port; the `ByteSource` port |
+| `services.py` | domain services / ports | `resolve_product` (the identity rules) wrapped by the `ProductIdentityResolver` facade (backend only — no threshold); the `Similarity` port (`threshold` lives on the backend); the `ByteSource` port |
 | `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories` (bundle): the **only** code that touches the connection — `load_catalog`, `entry_transaction()`, `reload()`; the connection is private (`_conn`) |
 | `schema.py` | persistence schema | SQLAlchemy `Table` metadata only; no function takes a `Connection` |
 | `infrastructure.py` | infrastructure | `HttpByteSource`/`S3ByteSource` + `build_source`, `download_to` / `verify_sqlite_header`, streamed feed (`iter_feed`) + ACL (`ProductEntry`), `screen_entry`, `Difflib`/`RapidFuzz` backends + `build_similarity`, Alembic wiring, the migration steps (`classify_source`, `rebuild_*`, …), and `SqliteCatalogRepository` (the `CatalogRepository` adapter) |
@@ -60,8 +60,9 @@ Seven modules, one per layer — full walkthrough in
 
 Injected, never built by the use cases: **one** `CatalogRepository` (prepares the DB
 *and* hands out the `CatalogRepositories` bundle), **one** `ProductIdentityResolver`
-(already carrying the similarity backend and the threshold), and **one** `ByteSource`
-(the seller-feed transport — the catalog download stays on plain `requests`).
+(already carrying the similarity backend — the threshold is not injected, the
+backend resolves it itself from `.env`), and **one** `ByteSource` (the
+seller-feed transport — the catalog download stays on plain `requests`).
 
 ## Data
 
@@ -142,7 +143,8 @@ schema validation (pydantic)
   -> exact lookup by normalized name (shared)
   -> exact normalized token multiset, ignoring word order (shared)
   -> gated fuzzy scan scored by Similarity (injected; difflib | rapidfuzz)
-  -> identity policy + threshold (shared)
+     -- similarity.threshold: resolved lazily from THRESHOLD in .env, or suggested_threshold
+  -> identity policy (shared)
   -> outcome: link | insert + link | skip and report
 ```
 
@@ -159,7 +161,7 @@ handling beyond this policy.
 
 Fuzzy gate (only when both exact-name and word-multiset lookup miss): brands equal
 after normalization when both are present, same word count, same numeric tokens,
-`score >= threshold`.
+`score >= similarity.threshold` (the backend's own, lazily-resolved cutoff).
 
 Outcomes per entry:
 
@@ -199,7 +201,10 @@ layer, the **adapters** in infrastructure, and the **composition root** (`cli`)
 picks one by name:
 
 - **`Similarity`** — the fuzzy-scoring backend (`difflib` / `rapidfuzz`), wrapped
-  with the threshold in a `ProductIdentityResolver`.
+  in a `ProductIdentityResolver`. The threshold is **not** part of that wiring: the
+  backend resolves its own `threshold` from `THRESHOLD` in `.env` (falling back to
+  `suggested_threshold`), lazily, the first time it is accessed, and caches it.
+  There is no `--threshold` CLI flag and nothing passes a threshold value around.
 - **`ByteSource`** — the byte-stream transport for the **seller feed only**
   (`http` via `requests` / `s3` via `boto3` `get_object`). Chosen with `--source`;
   `boto3` is imported lazily, only on the `s3` path, and the request is unsigned
@@ -210,15 +215,16 @@ picks one by name:
   so there is no value in making that transport swappable.
 
 Neither `similarity`, `threshold`, `requests` nor `boto3` is threaded layer by
-layer; no DI container, no framework. The similarity backend + threshold ride
-down the call chain inside the `ProductIdentityResolver`; the `ByteSource` is
-passed only to `ConsolidateCatalogUseCase` (and on to `iter_feed`).
+layer; no DI container, no framework. The similarity backend (which owns its own
+threshold) rides down the call chain inside the `ProductIdentityResolver`; the
+`ByteSource` is passed only to `ConsolidateCatalogUseCase` (and on to `iter_feed`).
 
 ```python
 # consolidation/services.py — the port (a domain-owned contract)
 class Similarity(Protocol):
     name: str
     suggested_threshold: float
+    threshold: float   # the effective, resolved cutoff — not injected, read by the backend itself
     def score(self, a: str, b: str) -> float: ...   # a, b already normalized -> [0, 1]
 ```
 
@@ -228,8 +234,12 @@ class Similarity(Protocol):
   extra terms that matter for identity (capacity, model).
 - `fuzz.ratio` and `difflib.ratio` are both `2M/T`; on this data both give `0.909`
   for `Roteador/Router`, so the same `0.90` threshold works. Not guaranteed in
-  general, hence each backend carries its own `suggested_threshold`; a `THRESHOLD` in
-  `.env` or the environment overrides it.
+  general, hence each backend carries its own `suggested_threshold`, overridden by
+  `THRESHOLD` in `.env` if present.
+- `threshold` is a `functools.cached_property`: resolved once, on first access —
+  either an explicit value passed to the constructor (tests only; production never
+  passes one) or `THRESHOLD` from `.env`, falling back to `suggested_threshold`.
+  There is no CLI flag and no `os.environ` fallback — `.env` is the only source.
 
 ```python
 # consolidation/services.py — the second port (also a domain-owned contract)
@@ -253,17 +263,20 @@ def build_source(name: str) -> ByteSource:
     raise ValueError(f"unknown source: {name!r} (options: http, s3)")
 
 # consolidation/cli.py — composition root: build the collaborators once, inject them
-resolver = ProductIdentityResolver(build_similarity(config["matcher"]), threshold)
+resolver = ProductIdentityResolver(build_similarity(config["matcher"]))
 source = build_source(config["source"])          # seller-feed transport only
 PrepareCatalogDatabaseUseCase(repository).execute(catalog_url, dest_dir)   # download_to: plain requests
 ConsolidateCatalogUseCase(repository, resolver, source).execute(prepared, products_url, output)
 #   -> ConsolidateFeedUseCase(repositories, resolver).execute(feed)   # feed = iter_feed(url, source)
 #   -> ConsolidateEntryUseCase(repositories, resolver)   # resolver.resolve(catalog, submission)
+#      -> resolve_product(catalog, submission, similarity)   # threshold read from similarity.threshold
 ```
 
-The `ProductIdentityResolver` bundles the backend *and* the threshold, so nothing
-downstream passes `similarity` or `threshold` around. Tests build it directly
-(`ProductIdentityResolver(DifflibSimilarity(), 0.90)`) — that is the payoff of the seam.
+The `ProductIdentityResolver` bundles only the backend, so nothing downstream
+passes `similarity` or `threshold` around — the threshold lives on the backend,
+loaded when the fuzzy stage first needs it. Tests build it directly
+(`ProductIdentityResolver(DifflibSimilarity(0.90))`, threshold explicit on the
+backend) — that is the payoff of the seam.
 
 Candidate retrieval for the fuzzy stage is a plain `select(Product)` scan (975 rows;
 instant). Indexed candidate reduction is out of scope.
@@ -272,8 +285,9 @@ instant). Indexed candidate reduction is out of scope.
 
 The composition root (`cli`) runs the two use cases in order.
 
-1. Resolve and validate configuration (CLI plus `.env` next to the entry point); the
-   composition root builds the `ProductIdentityResolver` (backend + threshold), the
+1. Resolve and validate configuration (CLI plus `.env` next to the entry point;
+   `THRESHOLD` is not part of this — it is read later, by the backend itself); the
+   composition root builds the `ProductIdentityResolver` (backend only), the
    feed `ByteSource` (`http`/`s3`) and the `SqliteCatalogRepository`.
 2. **`PrepareCatalogDatabaseUseCase`** — download `catalog.db` in chunks to a temp
    file (fresh every run) over plain HTTP(S) with `requests`, then drive an injected
