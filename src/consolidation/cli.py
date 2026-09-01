@@ -89,6 +89,41 @@ class _ConfigError(Exception):
     """A required option is missing or invalid."""
 
 
+def _require_http_url(name: str, url: str) -> None:
+    """Accept an ``https://`` URL, warn on ``http://``, reject anything else."""
+    scheme = urlparse(url).scheme
+    if scheme == "http":
+        logger.warning("non-TLS URL key=%s url=%s", name, url)
+    elif scheme != "https":
+        raise _ConfigError(f"{name} must be an http(s) URL, got: {url!r}")
+
+
+def _resolve_urls(catalog_url: str, products_url: str, source: str) -> tuple[str, str]:
+    """Validate the two input URLs for the chosen transport.
+
+    The catalog download is always plain HTTP(S). Only the seller feed honours
+    ``--source``: under ``s3`` the feed URL must be an ``s3://`` or
+    ``…amazonaws.com`` reference, and an HTTP(S) one is rewritten to
+    ``s3://bucket/key``. Returns the (possibly rewritten) ``(catalog_url, products_url)``.
+    """
+    _require_http_url("catalog-url", catalog_url)
+    if source != "s3":
+        _require_http_url("products-url", products_url)
+        return catalog_url, products_url
+
+    try:
+        bucket, key = infrastructure.parse_s3_ref(products_url)
+    except ValueError as exc:
+        raise _ConfigError(
+            f"products-url must be an s3:// or amazonaws.com URL when source=s3, "
+            f"got: {products_url!r}"
+        ) from exc
+    rewritten = f"s3://{bucket}/{key}"
+    if rewritten != products_url:
+        logger.info("rewrote products-url for source=s3 url=%s -> %s", products_url, rewritten)
+    return catalog_url, rewritten
+
+
 def _resolve(args: argparse.Namespace) -> dict[str, object]:
     env = dotenv_values(ENV_PATH)
 
@@ -109,29 +144,7 @@ def _resolve(args: argparse.Namespace) -> dict[str, object]:
     if source not in SOURCES:
         raise _ConfigError(f"source must be one of {SOURCES}, got: {source!r}")
 
-    # The catalog download is always plain HTTP(S); only the seller feed honours --source.
-    for name, url in (("catalog-url", catalog_url), ("products-url", products_url)):
-        if name == "products-url" and source == "s3":
-            continue
-        scheme = urlparse(url).scheme
-        if scheme == "http":
-            logger.warning("non-TLS URL key=%s url=%s", name, url)
-        elif scheme != "https":
-            raise _ConfigError(f"{name} must be an http(s) URL, got: {url!r}")
-
-    if source == "s3":
-        # Accept s3:// as-is; rewrite an http(s) …amazonaws.com feed URL to s3://bucket/key.
-        try:
-            bucket, key = infrastructure.parse_s3_ref(products_url)
-        except ValueError as exc:
-            raise _ConfigError(
-                f"products-url must be an s3:// or amazonaws.com URL when source=s3, "
-                f"got: {products_url!r}"
-            ) from exc
-        rewritten = f"s3://{bucket}/{key}"
-        if rewritten != products_url:
-            logger.info("rewrote products-url for source=s3 url=%s -> %s", products_url, rewritten)
-        products_url = rewritten
+    catalog_url, products_url = _resolve_urls(catalog_url, products_url, source)
 
     if matcher not in MATCHERS:
         raise _ConfigError(f"matcher must be one of {MATCHERS}, got: {matcher!r}")
