@@ -7,7 +7,8 @@ import pytest
 import requests
 import responses
 
-from consolidation.util import download_to, normalize, verify_sqlite_header
+from consolidation.domain import normalize
+from consolidation.infrastructure import download_to, verify_sqlite_header
 
 # --------------------------------------------------------------------------- #
 # normalize

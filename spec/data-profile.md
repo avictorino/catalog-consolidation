@@ -47,7 +47,7 @@ no `AUTOINCREMENT`.
 ### Conditional migration
 
 Keyed on Alembic's `alembic_version` table, so the tool can also run against a database
-it has already produced. `consolidation.db_upgrade.classify_source` inspects the table
+it has already produced. `consolidation.infrastructure.classify_source` inspects the table
 shape first and rejects an unrecognized schema before Alembic is invoked.
 
 | Detected source | Classified as | Action |
@@ -158,13 +158,14 @@ erDiagram
 ### Migration steps
 
 Revision `0001` (`migrations/versions/0001_refactor_catalog.py`) delegates to the
-helpers in `consolidation.db_upgrade`. Staged tables are built alongside the originals
+helpers in `consolidation.infrastructure`. Staged tables are built alongside the originals
 then swapped in. FK enforcement remains off during the rebuild because SQLite's
 `PRAGMA foreign_keys` is a no-op inside a transaction; `PRAGMA foreign_key_check`
-validates the result at the end. After the setup commits, the pipeline enables and
-verifies FK enforcement before consuming the feed, including for already-migrated
-sources. Normalization and every `uuid4` are computed in Python, so each extraction
-reads distinct values and builds an in-memory map (not a pure `INSERT ... SELECT`).
+validates the result at the end. As its final step, `PrepareCatalogDatabaseUseCase`
+enables and verifies FK enforcement on that same connection before the feed is
+consumed, including for already-migrated sources. Normalization and every `uuid4` are
+computed in Python, so each extraction reads distinct values and builds an in-memory
+map (not a pure `INSERT ... SELECT`).
 
 1. **staging tables**: create `Brand`, `Category`, `Seller`, `Product_new`,
    `ProductCategory_new`, `SellerProduct_new`.

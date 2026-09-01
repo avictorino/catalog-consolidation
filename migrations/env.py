@@ -1,16 +1,17 @@
 """Alembic environment.
 
 The consolidation tool always runs migrations *online* with a connection injected by
-:mod:`consolidation.pipeline` via ``config.attributes["connection"]`` — so the refactor
-executes inside the application's setup transaction. Offline (``--sql``) mode
-and autogenerate are not used.
+the ``CatalogRepository`` adapter (``consolidation.infrastructure``) via
+``config.attributes["connection"]`` — so the refactor executes inside the setup
+transaction opened by ``PrepareCatalogDatabaseUseCase``. Offline (``--sql``) mode and
+autogenerate are not used.
 """
 
 from __future__ import annotations
 
 from alembic import context
 
-from consolidation import db_upgrade
+from consolidation import schema
 
 config = context.config
 
@@ -25,7 +26,7 @@ def run_migrations_online() -> None:
 
     context.configure(
         connection=connection,
-        target_metadata=db_upgrade.metadata,
+        target_metadata=schema.metadata,
         transaction_per_migration=False,
         transactional_ddl=False,
     )

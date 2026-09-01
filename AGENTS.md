@@ -12,8 +12,35 @@ Working rules for AI assistance on this repository.
 - Implement the catalog consolidation tool described in [`spec/`](spec/) and [`prd.md`](prd.md).
 - The specification is authoritative. If code and spec disagree, fix the code or raise
   the discrepancy — do not silently diverge.
-- Keep the surface small: a handful of modules, small functions, explicit composition.
-  No DI container, no generic repository layer, no deep class hierarchies.
+- Keep the surface small: seven layer modules, small functions, explicit constructor
+  injection at the composition root. No DI container or framework, no deep class
+  hierarchies, no ORM.
+
+## Architecture (DDD, simplified)
+
+One module per layer — walkthrough in [`docs/arquitetura.md`](docs/arquitetura.md):
+
+| Module | Layer | Holds |
+| --- | --- | --- |
+| `domain.py` | domain | `normalize` / `new_uuid` / `brands_compatible`, `Product` & `Catalog` entities, `Submission` contract — no project or I/O imports |
+| `services.py` | domain services / ports | `resolve_product` / `ProductIdentityResolver` (identity rules) + `Similarity` port |
+| `repository.py` | repositories | the five aggregate repositories + `CatalogRepositories`; the **only** code that touches the connection (`load_catalog`, `entry_transaction()`, `reload()`); the connection is private (`_conn`) |
+| `schema.py` | persistence schema | SQLAlchemy `Table` metadata only; no `Connection` |
+| `infrastructure.py` | infrastructure | download, streamed feed + `ProductEntry` ACL, injection screen, matcher backends, Alembic wiring, migration steps, `SqliteCatalogRepository` |
+| `usecase.py` | application | `PrepareCatalogDatabaseUseCase`, `ConsolidateFeedUseCase`, `ConsolidateEntryUseCase`, `ConsolidateCatalogUseCase` coordinator, `CatalogRepository` port |
+| `cli.py` | interface / composition root | resolve config, build the resolver + repository, run the two use cases in order |
+
+Rules that follow from the layering:
+
+- `domain.py` imports nothing from the project and no I/O library. `schema.py` holds
+  no function that takes a `Connection`.
+- Raw `conn.execute` / `conn.begin` / `conn.commit` / `conn.rollback` appear **only**
+  inside `repository.py` and the `SqliteCatalogRepository` adapter.
+- The use cases receive exactly two collaborators, both built by `cli.py`: one
+  `CatalogRepository` (prepares the DB and hands out the `CatalogRepositories`
+  bundle) and one `ProductIdentityResolver` (wraps the `Similarity` backend and the
+  threshold). Nothing threads `similarity` or `threshold` layer by layer.
+- The migration revision (`0001`) delegates to helpers in `consolidation.infrastructure`.
 
 ## Design constraints
 
