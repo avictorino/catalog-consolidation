@@ -24,7 +24,7 @@ paths vary between executions:
 
 ```text
 HH:MM:SS [INFO] configuration catalog_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json output=<workspace>/catalog_output.db matcher=rapidfuzz threshold=0.9
-HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<temporary catalog path>.db.tmp
+HH:MM:SS [INFO] downloading catalog url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/catalog.db dest=<workspace>/.catalog-<hash>.db.tmp
 HH:MM:SS [INFO] download complete bytes=61440
 HH:MM:SS [INFO] source classified as=legacy
 HH:MM:SS [INFO] extracted reference table=Brand rows=637
@@ -34,26 +34,26 @@ HH:MM:SS [INFO] rebuilt Product rows=975
 HH:MM:SS [INFO] rebuilt SellerProduct sellers=0 links=0
 HH:MM:SS [INFO] schema refactor committed
 HH:MM:SS [INFO] foreign key enforcement enabled
-HH:MM:SS [INFO] catalog database prepared path=<temporary catalog path>.db.tmp
+HH:MM:SS [INFO] catalog database prepared path=<workspace>/.catalog-<hash>.db.tmp
 HH:MM:SS [INFO] run config products_url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json matcher=rapidfuzz threshold=0.9
 HH:MM:SS [INFO] catalog loaded products=975
 HH:MM:SS [INFO] streaming seller feed url=https://engineering-hiring-process.s3.us-east-1.amazonaws.com/ProductEntry.json
 HH:MM:SS [INFO] first feed record received
-HH:MM:SS [WARNING] event=approximate_match record=57 product_id=<uuid> score=0.909
-HH:MM:SS [WARNING] event=approximate_match record=64 product_id=<uuid> score=0.964
-HH:MM:SS [WARNING] event=category_divergence record=87 product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=87 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [WARNING] event=approximate_match record=57 seller=FootwearHub product=Router WiFi 6 TP-Link score=0.909
+HH:MM:SS [WARNING] event=approximate_match record=64 seller=SuperMart product=Processor AMD Ryzen 9 7950X score=0.964
+HH:MM:SS [WARNING] event=category_divergence record=87 seller=GardenStore product=Camera Canon EOS R6
+HH:MM:SS [INFO] event=duplicate_listing record=87 seller=GardenStore product=Camera Canon EOS R6
 HH:MM:SS [WARNING] event=sqli_attempt record=180 field=Brand fingerprint=s;E1; value="TestBrand'; SELECT 1; --"
-HH:MM:SS [INFO] event=duplicate_listing record=257 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=258 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=259 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=260 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=261 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=262 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=263 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=264 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=265 seller_id=<uuid> product_id=<uuid>
-HH:MM:SS [INFO] event=duplicate_listing record=266 seller_id=<uuid> product_id=<uuid>
+HH:MM:SS [INFO] event=duplicate_listing record=257 seller=OfficeSupply product=Basketball Spalding Official
+HH:MM:SS [INFO] event=duplicate_listing record=258 seller=GardenStore product=Basketball Hoop Portable
+HH:MM:SS [INFO] event=duplicate_listing record=259 seller=CleaningWorld product=Soccer Ball Size 5
+HH:MM:SS [INFO] event=duplicate_listing record=260 seller=FootwearHub product=Soccer Goal Portable
+HH:MM:SS [INFO] event=duplicate_listing record=261 seller=AccessoryWorld product=Soccer Shin Guards
+HH:MM:SS [INFO] event=duplicate_listing record=262 seller=SmartHomeStore product=Goalkeeper Gloves
+HH:MM:SS [INFO] event=duplicate_listing record=263 seller=MegaStore product=Football Official Size
+HH:MM:SS [INFO] event=duplicate_listing record=264 seller=TechWorld product=Football Gloves Receiver
+HH:MM:SS [INFO] event=duplicate_listing record=265 seller=ElectroHub product=Football Helmet Adult
+HH:MM:SS [INFO] event=duplicate_listing record=266 seller=GadgetZone product=Baseball Glove Adult
 HH:MM:SS [INFO] feed summary processed=269 new=0 linked=256 skipped=0 threat=1 failed=0
 HH:MM:SS [WARNING] feed threats rejected=1
 HH:MM:SS [INFO] feed processing complete

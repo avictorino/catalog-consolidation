@@ -158,10 +158,10 @@ class ConsolidateEntryUseCase:
         if existing_sku is not None:
             if existing_sku != submission.Id:
                 logger.info(
-                    "event=duplicate_listing record=%d seller_id=%s product_id=%s",
+                    "event=duplicate_listing record=%d seller=%s product=%s",
                     record_index,
-                    seller_id,
-                    product.id,
+                    submission.SellerName,
+                    product.name,
                 )
             return
 
@@ -221,9 +221,10 @@ class ConsolidateEntryUseCase:
                 report.new += 1
         elif resolution.score is not None:
             logger.warning(
-                "event=approximate_match record=%d product_id=%s score=%.3f",
+                "event=approximate_match record=%d seller=%s product=%s score=%.3f",
                 record_index,
-                product.id,
+                submission.SellerName,
+                product.name,
                 resolution.score,
             )
 
@@ -236,7 +237,10 @@ class ConsolidateEntryUseCase:
         self._attach_category(product, submission.Category)
         if diverges:
             logger.warning(
-                "event=category_divergence record=%d product_id=%s", record_index, product.id
+                "event=category_divergence record=%d seller=%s product=%s",
+                record_index,
+                submission.SellerName,
+                product.name,
             )
 
         seller_id = seller_id or self.repositories.sellers.get_or_create(submission.SellerName)
