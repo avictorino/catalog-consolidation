@@ -60,8 +60,12 @@ def resolve_product(
     Returns ``(product, reason, score)``:
 
     * ``(product, None, score?)`` — matched (``score`` set only for a fuzzy match);
-    * ``(None, reason, None)``    — skip and report (ambiguous / brand conflict);
+    * ``(None, reason, None)``    — skip and report (ambiguous);
     * ``(None, None, None)``      — genuinely new product.
+
+    Identity is name **and** brand: a submission whose name matches an existing
+    product but whose brand normalizes to a different, non-empty value is a
+    *different* product (it gets created afresh), not a conflict to skip.
 
     Order of rules: exact normalized name -> identical word multiset (any order)
     -> gated fuzzy scan. Category never participates; the feed ``Id`` never does.
@@ -70,12 +74,12 @@ def resolve_product(
 
     exact_matches = catalog.find_by_name(normalized_name)
     if exact_matches:
-        if len(exact_matches) != 1:
+        compatible = [p for p in exact_matches if p.brand_compatible_with(submission.Brand)]
+        if not compatible:
+            return None, None, None
+        if len(compatible) != 1:
             return None, "ambiguous exact name", None
-        product = exact_matches[0]
-        if not product.brand_compatible_with(submission.Brand):
-            return None, "brand conflict", None
-        return product, None, None
+        return compatible[0], None, None
 
     name_tokens = Counter(normalized_name.split())
     word_matches = [
@@ -86,7 +90,7 @@ def resolve_product(
     if word_matches:
         compatible = [p for p in word_matches if p.brand_compatible_with(submission.Brand)]
         if not compatible:
-            return None, "brand conflict", None
+            return None, None, None
         if len(compatible) > 1:
             return None, "ambiguous word order", None
         return compatible[0], None, None
