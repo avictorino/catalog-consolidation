@@ -65,13 +65,24 @@ def test_word_order_does_not_ignore_product_attributes(
     assert score is None
 
 
+def test_exact_name_different_brand_is_a_new_product(similarity: Similarity) -> None:
+    catalog = Catalog([Product("existing", "Smartphone Galaxy S23", "Samsung")])
+    entry = ProductEntry(Id="sku", SellerName="seller", Name="Smartphone Galaxy S23", Brand="Other")
+
+    product, reason, score = resolve_product(catalog, entry, similarity, 0.90)
+
+    assert product is None
+    assert reason is None
+    assert score is None
+
+
 @pytest.mark.parametrize(
     ("first_brand", "second_brand", "expected_id", "expected_reason"),
     [
         ("Samsung", "Other", "first", None),
         ("Samsung", "Samsung", None, "ambiguous word order"),
         ("Samsung", None, None, "ambiguous word order"),
-        ("Other", "Other", None, "brand conflict"),
+        ("Other", "Other", None, None),
     ],
 )
 def test_word_order_requires_one_brand_compatible_candidate(
